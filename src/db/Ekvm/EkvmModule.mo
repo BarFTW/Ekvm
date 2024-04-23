@@ -4,6 +4,8 @@ import Nat "mo:base/Nat";
 import Blob "mo:base/Blob";
 import Nat32 "mo:base/Nat32";
 import Bool "mo:base/Bool";
+import StableMemory "mo:base/ExperimentalStableMemory";
+import Debug "mo:base/Debug";
 
 import BTree "mo:stableheapbtreemap/BTree";
 
@@ -18,7 +20,7 @@ module {
     public type Ekvm = {
         var indexPrincipal: Principal;
         var numBuckets: Nat;
-        var minMem: Nat;
+        var minMem: Nat64;
         var indexMap: IndexManagmentMap;
         var bucket: BucketModule.Bucket;
         var localShards: BTree.BTree<Nat32, BTree.BTree<Text, Principal>>;
@@ -49,16 +51,19 @@ module {
     };
 
     private func allocateNewActiveBucketCanister(ekvm: Ekvm) : async () {
+        Debug.print(debug_show ("creating new active bucket caniste..."));
         let newCan = await BucketActor.Bucket(ekvm.numBuckets);
         ekvm.activeBucketCanister := Principal.fromActor(newCan);
     };
 
     private func allocateNewActiveDataCanister(ekvm: Ekvm) : async () {
+        Debug.print(debug_show ("creating new active data caniste..."));
         let newCan = await BucketActor.Bucket(ekvm.numBuckets);
         ekvm.activeDataCanister := Principal.fromActor(newCan);
     };
 
     private func putDataInNewCanister(ekvm: Ekvm, key: Text, value: Blob) : async Bool {
+        Debug.print(debug_show ("not enough memory left..."));
         await allocateNewActiveDataCanister(ekvm);
         let dataCanister = actor (Principal.toText(ekvm.activeDataCanister)) : BucketActor.Bucket;
         await dataCanister.put(key, value);
@@ -67,7 +72,10 @@ module {
     public func put(ekvm: Ekvm, key: Text, value: Blob) : async Bool {
         if (Principal.equal(ekvm.activeDataCanister, ekvm.indexPrincipal)) {
             // todo: check if local have enough memory
-            let hasMemory = true;
+            let memoryUsage = StableMemory.stableVarQuery();
+            let currentMemory = (await memoryUsage()).size;
+            let hasMemory = currentMemory < ekvm.bucket.threshold;
+
             if (hasMemory) {
                 ignore BTree.insert<Text, Blob>(ekvm.bucket.data, Utils.textToOrder, key, value);
             } else {
@@ -91,7 +99,7 @@ module {
             };
         };
         if (Principal.equal(shardLocation, ekvm.indexPrincipal)) {
-            let hasMemory = BucketModule.addKeyToShard(ekvm.bucket, key, ekvm.indexPrincipal);
+            let hasMemory = await BucketModule.addKeyToShard(ekvm.bucket, key, ekvm.indexPrincipal);
             if (not hasMemory) {
                 await putDataInNewCanister(ekvm, key, value);
             }
@@ -109,7 +117,7 @@ module {
 
     public func create(
         numBuckets: Nat,
-        minMem: Nat,
+        minMem: Nat64,
         indexPrincipal: Principal,
         activeBucketCanister: Principal,
         activeDataCanister: Principal
@@ -121,7 +129,7 @@ module {
             var activeBucketCanister = activeBucketCanister;
             var activeDataCanister = activeDataCanister;
             var indexMap = BTree.init<Nat32, Principal>(null);
-            var bucket = BucketModule.create(numBuckets);
+            var bucket = BucketModule.create(numBuckets, ?minMem);
             var localShards = BTree.init<Nat32, BTree.BTree<Text, Principal>>(null);
         };
     };

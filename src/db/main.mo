@@ -2,80 +2,50 @@ import EkvmModule "Ekvm/EkvmModule";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Debug "mo:base/Debug";
+import StableMemory "mo:base/ExperimentalStableMemory";
+import Nat64 "mo:base/Nat64";
+import Iter "mo:base/Iter";
+import Nat "mo:base/Nat";
+
 
 actor class TestDBUser() = this {
 
-    type definite_canister_settings = {
-        controllers : [Principal];
-        compute_allocation : Nat;
-        memory_allocation : Nat;
-        freezing_threshold : Nat;
-        reserved_cycles_limit : Nat;
-    };
-
-
-    type canister_status_args = {
-        canister_id : Principal;
-    };
-
-    type canister_status_result = {
-        status : { #running; #stopping; #stopped };
-        settings : definite_canister_settings;
-        module_hash : ?Blob;
-        memory_size : Nat;
-        cycles : Nat;
-        reserved_cycles : Nat;
-        idle_cycles_burned_per_day : Nat;
-    };
-
-
-    var db : ?EkvmModule.Ekvm = null;
+    stable var db : ?EkvmModule.Ekvm = null;
 
     public func init() {
-                // let IC = actor("aaaaa-aa") : actor { 
-                //     canister_status : (canister_status_args) -> async canister_status_result;
-                // };
-                // let mem = await IC.canister_status({ canister_id = Principal.fromActor(this) });
-                // Debug.print(
-                //     "memory_size_1: " # debug_show (mem.memory_size)
-                //     # "\nmemory_allocation_1" # debug_show (mem.settings.memory_allocation)
-                //     # "\ncompute_allocation_1" #debug_show (mem.settings.compute_allocation)
-                // );
-
         Debug.print "----init----";
+        let memoryUsage = StableMemory.stableVarQuery();
+        let beforeSize = (await memoryUsage()).size;
+
         let myPrincipal = Principal.fromActor(this);
-        db := ?EkvmModule.create(100, 0, myPrincipal, myPrincipal, myPrincipal);
+        db := ?EkvmModule.create(100, 4000, myPrincipal, myPrincipal, myPrincipal);
+        let afterSize = (await memoryUsage()).size;
+
+        Debug.print("init_afterSize - " # debug_show (afterSize));
+        Debug.print("init_beforeSize - " # debug_show (beforeSize));
+        Debug.print("init_diff - " # debug_show (afterSize - beforeSize));
     };
 
     public func test() : async ?Text {
+        let memoryUsage = StableMemory.stableVarQuery();
         switch(db) {
             case(?db) { 
                 Debug.print "----test----";
+        let beforeSize = (await memoryUsage()).size;
+        var afterSize: Nat64 = 0;
 
-
-                let IC = actor("aaaaa-aa") : actor { 
-                        canister_status : (canister_status_args) -> async canister_status_result;
+                for (i in Iter.range(0, 1000000)) {
+                    if (i % 1000 == 0){
+                        afterSize := (await memoryUsage()).size;
+                        Debug.print("i - " # Nat.toText(i) # "; afterSize - " # Nat64.toText(afterSize));
+                    };
+                    ignore await EkvmModule.put(db, "foo" # Nat.toText(i), Text.encodeUtf8("bar" # Nat.toText(i)));
                 };
-                var mem = await IC.canister_status({ canister_id = Principal.fromActor(this) });
-                Debug.print(
-                    "memory_size_2: " # debug_show (mem.memory_size)
-                    # "\nmemory_allocation_2: " # debug_show (mem.settings.memory_allocation)
-                    # "\ncompute_allocation_2: " #debug_show (mem.settings.compute_allocation)
-                );
+        afterSize := (await memoryUsage()).size;
 
-
-                ignore await EkvmModule.put(db, "foo", Text.encodeUtf8("bar"));
-                Debug.print "2";
-                // ignore EkvmModule.put(db, "hello", Text.encodeUtf8("world"));
-                // ignore EkvmModule.put(db, "bla", Text.encodeUtf8("bla"));
-
-                mem := await IC.canister_status({ canister_id = Principal.fromActor(this) });
-                Debug.print(
-                    "memory_size_3: " # debug_show (mem.memory_size)
-                    # "\nmemory_allocation_3: " # debug_show (mem.settings.memory_allocation)
-                    # "\ncompute_allocation_3: " #debug_show (mem.settings.compute_allocation)
-                );
-
+        Debug.print("test_afterSize - " # debug_show (afterSize));
+        Debug.print("test_beforeSize - " # debug_show (beforeSize));
+        Debug.print("test_diff - " # debug_show (afterSize - beforeSize));
 
                 switch(await EkvmModule.get(db, "foo")) {
                     case (?a) {

@@ -6,7 +6,7 @@ shared({caller}) actor class Bucket(numOfShards: Nat) = thisBucket {
     type BucketData = BucketModule.BucketData;
     type DataLocation = BucketModule.DataLocation;
 
-    let bucket = BucketModule.create(numOfShards);
+    let bucket = BucketModule.create(numOfShards, null);
 
 
     public func get(key: Text) : async ?Blob {
@@ -14,15 +14,11 @@ shared({caller}) actor class Bucket(numOfShards: Nat) = thisBucket {
     };
 
     public func put(key: Text, value: Blob) : async Bool {
-        let hsaMemory = await BucketModule.put(bucket, key, value);
-        // todo: return true if theres enough memory
-        // if (not hasMemory) {
-
-        // }
+        await BucketModule.put(bucket, key, value);
     };
 
     public func addKeyToShard(key: Text, dataPrincipal: DataLocation) : async Bool {
-        BucketModule.addKeyToShard(bucket, key, dataPrincipal);
+        await BucketModule.addKeyToShard(bucket, key, dataPrincipal);
     };
 
     public func whereIs(key: Text) : async ?DataLocation {
