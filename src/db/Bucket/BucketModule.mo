@@ -1,6 +1,7 @@
 import Text "mo:base/Text";
 import Principal "mo:base/Principal";
-import HashMap "mo:base/HashMap";
+import BTree "mo:stableheapbtreemap/BTree";
+
 import Nat32 "mo:base/Nat32";
 import Nat "mo:base/Nat";
 import Utils "../utils";
@@ -9,51 +10,54 @@ module {
     type Key = Text;
     type Value = Blob;
     public type DataLocation = Principal;
-    public type BucketData = HashMap.HashMap<Text, Blob>;
+    public type BucketData = BTree.BTree<Text, Blob>;
 
     public type Bucket = {
         data: BucketData;
         numOfBuckets: Nat;
-        localShards: HashMap.HashMap<Nat32, HashMap.HashMap<Text, Principal>>;
+        localShards: BTree.BTree<Nat32, BTree.BTree<Key, DataLocation>>;
     };
 
     public func create(numOfBuckets: Nat) : Bucket {
         let new: Bucket = {
-            data = HashMap.HashMap<Text, Blob>(0, Text.equal, Text.hash);
+            data = BTree.init<Text, Blob>(null);
             numOfBuckets = numOfBuckets;
-            localShards =HashMap.HashMap<Nat32, HashMap.HashMap<Text, Principal>>(0, Nat32.equal, Utils.hashNat);
+            localShards =BTree.init<Nat32, BTree.BTree<Text, Principal>>(null);
         };
         return new;
     };
 
     public func get(b: Bucket, key: Key) : async ?Value {
-        b.data.get(key);
+        BTree.get<Key, Value>(b.data, Utils.textToOrder, key);
     };
 
-    public func put(b: Bucket, key: Key, value: Value) {
-        b.data.put(key, value);
+    public func put(b: Bucket, key: Key, value: Value) : async Bool {
+        ignore BTree.insert<Key, Value>(b.data, Utils.textToOrder, key, value);
+        true;
     };
 
     public func addKeyToShard(b: Bucket, key: Key, dataPrincipal: Principal) : Bool {
         let id = Utils.key2Id(key, b.numOfBuckets);
-        switch(b.localShards.get(id)) {
+        switch(BTree.get<Nat32, BTree.BTree<Text, Principal>>(b.localShards, Utils.nat32toOrder, id)) {
             case(?shard) {
-                shard.put(key, dataPrincipal);
-                true;
+                ignore BTree.insert<Text, Principal>(shard, Utils.textToOrder, key, dataPrincipal);
+                return true;
             };
             case(null) {
-                let shard = HashMap.HashMap<Text, Principal>(1, Text.equal, Text.hash);
-                shard.put(key, dataPrincipal);
-                b.localShards.put(id, shard);
-                true;
+                let shard = BTree.init<Text, Principal>(null);
+                ignore BTree.insert<Text, Principal>(shard, Utils.textToOrder, key, dataPrincipal);
+                ignore BTree.insert<Nat32, BTree.BTree<Text, Principal>>(b.localShards, Utils.nat32toOrder, id, shard);
+                return true;
             };
         };
+        return false;
     };
 
-    public func whereIs(b: Bucket, key: Text) : ?DataLocation {
+    public func whereIs(b: Bucket, key: Key) : ?DataLocation {
         let id = Utils.key2Id(key, b.numOfBuckets);
-        switch(b.localShards.get(id)) {
-            case (?shard) shard.get(key);
+        switch(BTree.get<Nat32, BTree.BTree<Key, DataLocation>>(b.localShards, Utils.nat32toOrder, id)) {
+            case (?shard) 
+                BTree.get<Key, DataLocation>(shard, Utils.textToOrder, key);
             case (_) { null };
         };
     };

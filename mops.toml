@@ -1,2 +1,3 @@
 [dependencies]
 base = "0.11.1"
+stableheapbtreemap = "1.5.0"

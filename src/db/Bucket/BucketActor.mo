@@ -10,16 +10,16 @@ shared({caller}) actor class Bucket(numOfShards: Nat) = thisBucket {
 
 
     public func get(key: Text) : async ?Blob {
-        bucket.data.get(key);
+        await BucketModule.get(bucket, key);
     };
 
     public func put(key: Text, value: Blob) : async Bool {
-        bucket.data.put(key, value);
-        true;
+        let hsaMemory = await BucketModule.put(bucket, key, value);
         // todo: return true if theres enough memory
-    };
+        // if (not hasMemory) {
 
-    // public func getShard(id) : 
+        // }
+    };
 
     public func addKeyToShard(key: Text, dataPrincipal: DataLocation) : async Bool {
         BucketModule.addKeyToShard(bucket, key, dataPrincipal);
