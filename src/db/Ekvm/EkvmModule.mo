@@ -4,6 +4,8 @@ import Nat "mo:base/Nat";
 import Blob "mo:base/Blob";
 import Nat32 "mo:base/Nat32";
 import Bool "mo:base/Bool";
+
+import Cycles "mo:base/ExperimentalCycles";
 import StableMemory "mo:base/ExperimentalStableMemory";
 import Debug "mo:base/Debug";
 
@@ -28,91 +30,143 @@ module {
         var activeDataCanister: Principal;
     };
 
-    private func whoManages(ekvm: Ekvm, id: Text) : ?Principal {
-        let hash = Text.hash(id);
-        let modulo = Nat32.toNat(hash) % ekvm.numBuckets;
-        BTree.get<Nat32, Principal>(ekvm.indexMap, Utils.nat32toOrder, Nat32.fromNat(modulo));
-        
+// should be private
+    public func whoManages(ekvm: Ekvm, key: Text) : ?Principal {
+        let id = Utils.key2Id(key, ekvm.numBuckets);
+        BTree.get<Nat32, Principal>(ekvm.indexMap, Utils.nat32toOrder, id);
     };
 
     public func get(ekvm: Ekvm, key: Text) : async ?Blob {
         switch(whoManages(ekvm, key)) {
-            case(?shardPrincipal) { 
-                if (Principal.equal(shardPrincipal, ekvm.indexPrincipal)) {
-                    BTree.get<Text, Blob>(ekvm.bucket.data, Utils.textToOrder, key);
+            case(?shardLocation) { 
+                if (Principal.equal(shardLocation, ekvm.indexPrincipal)) {
+                    Debug.print("Local shard");
+                    switch(BucketModule.whereIs(ekvm.bucket, key)) {
+                        case(?dataLocation) { 
+                            if (Principal.equal(dataLocation, ekvm.indexPrincipal)) {
+                                Debug.print("Local data");
+                                return BTree.get<Text, Blob>(ekvm.bucket.data, Utils.textToOrder, key);
+                            }
+                            else {
+                                Debug.print("External data");
+                                let dataCanister = actor (Principal.toText(dataLocation)) : BucketActor.Bucket;
+                                return await dataCanister.get(key);
+                            }
+                         };
+                        case(_) { null; };
+                    };
                 }
                 else {
-                    let shardCanister = actor (Principal.toText(shardPrincipal)) : BucketActor.Bucket;
-                    await shardCanister.get(key);
+                    Debug.print("External shard");
+                    let shardCanister = actor (Principal.toText(shardLocation)) : BucketActor.Bucket;
+                    Cycles.add(15000000000);
+                    switch(await shardCanister.whereIs(key)) {
+                        case(?dataLocation) {
+                            Debug.print("data location: " # debug_show (dataLocation));
+                            if (Principal.equal(dataLocation, ekvm.indexPrincipal)) {
+                                return await BucketModule.get(ekvm.bucket, key);
+                            }
+                            else {
+                                let dataCanister = actor (Principal.toText(dataLocation)) : BucketActor.Bucket;
+                                return await dataCanister.get(key);
+                            }
+                         };
+                        case(_) { null; };
+                    };
                 };
              };
             case(_) { null };
         };
     };
 
-    private func allocateNewActiveBucketCanister(ekvm: Ekvm) : async () {
-        Debug.print(debug_show ("creating new active bucket caniste..."));
+    private func allocateNewActiveBucketCanister(ekvm: Ekvm) : async BucketActor.Bucket {
+        Debug.print(debug_show ("creating new active bucket canister..."));
+        Cycles.add(15000000000);
         let newCan = await BucketActor.Bucket(ekvm.numBuckets);
         ekvm.activeBucketCanister := Principal.fromActor(newCan);
+        return newCan;
     };
 
-    private func allocateNewActiveDataCanister(ekvm: Ekvm) : async () {
-        Debug.print(debug_show ("creating new active data caniste..."));
+    private func putBucketInNewCanister(ekvm: Ekvm, key: Text, value: Blob) : async Bool {
+        Debug.print(debug_show ("not enough memory left..."));
+        let bucketCanister = await allocateNewActiveBucketCanister(ekvm);
+        Cycles.add(15000000000);
+        await bucketCanister.put(key, value);
+    };
+
+    private func allocateNewActiveDataCanister(ekvm: Ekvm) : async BucketActor.Bucket {
+        Debug.print(debug_show ("creating new active data canister..."));
+        Cycles.add(15000000000);
         let newCan = await BucketActor.Bucket(ekvm.numBuckets);
         ekvm.activeDataCanister := Principal.fromActor(newCan);
+        Debug.print("New Active data canister: " # debug_show (ekvm.activeDataCanister));
+        return newCan;
     };
 
-    private func putDataInNewCanister(ekvm: Ekvm, key: Text, value: Blob) : async Bool {
+    private func putDataInNewCanister(ekvm: Ekvm, key: Text, value: Blob) : async Principal {
         Debug.print(debug_show ("not enough memory left..."));
-        await allocateNewActiveDataCanister(ekvm);
-        let dataCanister = actor (Principal.toText(ekvm.activeDataCanister)) : BucketActor.Bucket;
-        await dataCanister.put(key, value);
+        let bucketActor = await allocateNewActiveDataCanister(ekvm);
+        Cycles.add(15000000000);
+        ignore await bucketActor.put(key, value);
+        Principal.fromActor(bucketActor);
     };
 
-    public func put(ekvm: Ekvm, key: Text, value: Blob) : async Bool {
-        if (Principal.equal(ekvm.activeDataCanister, ekvm.indexPrincipal)) {
-            // todo: check if local have enough memory
-            let memoryUsage = StableMemory.stableVarQuery();
-            let currentMemory = (await memoryUsage()).size;
-            let hasMemory = currentMemory < ekvm.bucket.threshold;
-
-            if (hasMemory) {
+    public func put(ekvm: Ekvm, key: Text, value: Blob, forceNewExternal: Bool) : async Bool {
+        var activeDataCanister = ekvm.activeDataCanister;
+        // put data in active data canister
+        if (not forceNewExternal and Principal.equal(activeDataCanister, ekvm.indexPrincipal)) {
+            // internal canister
+            Debug.print("Ekvm.put() - Internal");
+            // has memory?
+            if (await Utils.checkMem(ekvm.bucket.threshold)) {
+                // put to local data
+                Debug.print("Insert to local Map.");
                 ignore BTree.insert<Text, Blob>(ekvm.bucket.data, Utils.textToOrder, key, value);
             } else {
-                ignore await putDataInNewCanister(ekvm, key, value);
+                // put to external data
+                activeDataCanister := await putDataInNewCanister(ekvm, key, value);
             }
         }
+        else if (forceNewExternal) {
+            // test new external canister
+            Debug.print("Ekvm.put() - Test Externral");
+            Cycles.add(15000000000);
+            activeDataCanister := await putDataInNewCanister(ekvm, key, value);
+        }
         else {
-            var dataCanister = actor (Principal.toText(ekvm.activeDataCanister)) : BucketActor.Bucket;
-            let hasMemory = await dataCanister.put(key, value);
+            // external canister
+            Debug.print("Ekvm.put() - Externral-1");
+            var dataCanister = actor (Principal.toText(activeDataCanister)) : BucketActor.Bucket;
+            Debug.print("Ekvm.put() - Externral-2");
+            Cycles.add(15000000000);
+            Debug.print("put to another canister: " # debug_show(Principal.toText(activeDataCanister)));
+            let hasMemory : Bool = await dataCanister.put(key, value);
             if (not hasMemory) {
-                ignore await putDataInNewCanister(ekvm, key, value);
+                activeDataCanister := await putDataInNewCanister(ekvm, key, value);
             }
         };
-        let id = Utils.key2Id(key, ekvm.numBuckets);
 
-        let shardLocation = switch(BTree.get<Nat32, Principal>(ekvm.indexMap, Utils.nat32toOrder, id)) {
+        // set data location and shard manager
+        let shardLocation = switch(whoManages(ekvm, key)) {
             case(?shardLocation) shardLocation;
-            case(null) {
+            case(_) {
+                let id : Nat32 = Utils.key2Id(key, ekvm.numBuckets);
                 ignore BTree.insert<Nat32, Principal>(ekvm.indexMap, Utils.nat32toOrder, id, ekvm.activeBucketCanister);
                 ekvm.activeBucketCanister;
             };
         };
+
         if (Principal.equal(shardLocation, ekvm.indexPrincipal)) {
-            let hasMemory = await BucketModule.addKeyToShard(ekvm.bucket, key, ekvm.indexPrincipal);
-            if (not hasMemory) {
-                await putDataInNewCanister(ekvm, key, value);
-            }
-            else return true;
+            let hasMemory = 
+                await BucketModule.addKeyToShard(ekvm.bucket, key, activeDataCanister);
         }
         else {
+            Debug.print("external shard canister");
             let shardCanister = actor (Principal.toText(shardLocation)) : BucketActor.Bucket;
-            let hasMemory = await shardCanister.addKeyToShard(key, ekvm.activeDataCanister);
-            if (not hasMemory) {
-                await putDataInNewCanister(ekvm, key, value);
-            }
-            else return true;
-        }
+            Cycles.add(15000000000);
+            let hasMemory =
+                await shardCanister.addKeyToShard(key, activeDataCanister);
+        };
     };
 
     public func create(

@@ -50,12 +50,12 @@ module {
     };
 
     public func addKeyToShard(b: Bucket, key: Key, dataPrincipal: Principal) : async Bool {
-        let memoryUsage = StableMemory.stableVarQuery();
-        let currentMemory = (await memoryUsage()).size;
-        let hasMemory = currentMemory < b.threshold;
+        // let memoryUsage = StableMemory.stableVarQuery();
+        // let currentMemory = (await memoryUsage()).size;
+        // let hasMemory = currentMemory < b.threshold;
 
-        if (not hasMemory)
-            return false;
+        // if (not hasMemory)
+        //     return false;
 
         let id = Utils.key2Id(key, b.numOfBuckets);
         switch(BTree.get<Nat32, BTree.BTree<Text, Principal>>(b.localShards, Utils.nat32toOrder, id)) {

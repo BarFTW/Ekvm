@@ -3,6 +3,8 @@ import Text "mo:base/Text";
 import Nat32 "mo:base/Nat32";
 import Nat "mo:base/Nat";
 import Order "mo:base/Order";
+import StableMemory "mo:base/ExperimentalStableMemory";
+import Nat64 "mo:base/Nat64";
 
 module {
     public func key2Id(key: Text, numOfShards : Nat) : Nat32 {
@@ -28,5 +30,11 @@ module {
         if (Text.less(t1, t2))
             return #less;
         return #equal;
+    };
+
+    public func checkMem(threshold: Nat64) : async Bool {
+        let memoryUsage = StableMemory.stableVarQuery();
+        let currentMemory = (await memoryUsage()).size;
+        currentMemory < threshold;
     };
 };
