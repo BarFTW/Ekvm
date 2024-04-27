@@ -6,14 +6,13 @@ import Nat32 "mo:base/Nat32";
 import Bool "mo:base/Bool";
 
 import Cycles "mo:base/ExperimentalCycles";
-import StableMemory "mo:base/ExperimentalStableMemory";
 import Debug "mo:base/Debug";
 
 import BTree "mo:stableheapbtreemap/BTree";
 
-import Utils "../utils";
-import BucketModule "../Bucket/BucketModule";
-import BucketActor "../Bucket/BucketActor";
+import Utils "utils";
+import BucketModule "BucketModule";
+import BucketActor "BucketActor";
 
 module {
     public type IndexManagmentMap = BTree.BTree<Nat32, Principal>;
@@ -159,6 +158,7 @@ module {
         if (Principal.equal(shardLocation, ekvm.indexPrincipal)) {
             let hasMemory = 
                 await BucketModule.addKeyToShard(ekvm.bucket, key, activeDataCanister);
+            
         }
         else {
             Debug.print("external shard canister");

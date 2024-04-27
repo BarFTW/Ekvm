@@ -1,21 +1,8 @@
 {
   "canisters": {
-    "Amba_backend": {
-      "main": "src/Amba_backend/main.mo",
-      "type": "motoko"
-    },
-    "Amba_frontend": {
-      "dependencies": [
-        "Amba_backend"
-      ],
-      "source": [
-        "src/Amba_frontend/assets"
-      ],
-      "type": "assets"
-    },
-    "db": {
+    "Ekvm": {
       "type": "motoko",
-      "main": "src/db/main.mo"
+      "main": "src/db/test.mo"
     }
   },
   "defaults": {

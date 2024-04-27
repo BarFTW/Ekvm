@@ -6,7 +6,7 @@ import BTree "mo:stableheapbtreemap/BTree";
 
 import Nat32 "mo:base/Nat32";
 import Nat "mo:base/Nat";
-import Utils "../utils";
+import Utils "utils";
 
 module {
     type Key = Text;
