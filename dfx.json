@@ -1,8 +1,8 @@
 {
   "canisters": {
-    "Ekvm": {
+    "db_test": {
       "type": "motoko",
-      "main": "src/db/test.mo"
+      "main": "src/test.mo"
     }
   },
   "defaults": {
