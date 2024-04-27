@@ -1,4 +1,4 @@
-import EkvmModule "Ekvm/EkvmModule";
+import EkvmModule "Ekvm";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Debug "mo:base/Debug";
@@ -11,8 +11,8 @@ import Iter "mo:base/Iter";
 import Nat "mo:base/Nat";
 import Blob "mo:base/Blob";
 import BTree "mo:stableheapbtreemap/BTree";
-import BucketModule "Bucket/BucketModule";
-import BucketActor "Bucket/BucketActor";
+import BucketModule "BucketModule";
+import BucketActor "BucketActor";
 import Utils "utils";
 
 
