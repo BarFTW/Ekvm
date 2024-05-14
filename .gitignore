@@ -24,6 +24,10 @@ dist/
 # environment variables
 .env
 
+src/test.mo
+dfx.json
 .mops
+
+# logs
 log.err
 log.txt
