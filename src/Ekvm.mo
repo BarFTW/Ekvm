@@ -3,6 +3,7 @@ import Principal "mo:base/Principal";
 import Nat "mo:base/Nat";
 import Blob "mo:base/Blob";
 import Nat32 "mo:base/Nat32";
+import Nat64 "mo:base/Nat64";
 import Bool "mo:base/Bool";
 
 import Cycles "mo:base/ExperimentalCycles";
@@ -27,7 +28,13 @@ module {
         var localShards: BTree.BTree<Nat32, BTree.BTree<Text, Principal>>;
         var activeBucketCanister: Principal;
         var activeDataCanister: Principal;
+        var mockMode: Bool;
+        var mockMem: Nat64;
     };
+
+    // public func setMockMode(currentSize: Nat64) {
+    //     Utils.setMockMode(currentSize);
+    // };
 
 // should be private
     public func whoManages(ekvm: Ekvm, key: Text) : ?Principal {
@@ -117,14 +124,15 @@ module {
             // internal canister
             Debug.print("Ekvm.put() - Internal");
             // has memory?
-            if (await Utils.checkMem(ekvm.bucket.threshold)) {
+            if (await Utils.checkMem(ekvm.bucket.threshold, ekvm.mockMode, Nat64.fromNat(0))) {
                 // put to local data
                 Debug.print("Insert to local Map.");
                 ignore BTree.insert<Text, Blob>(ekvm.bucket.data, Utils.textToOrder, key, value);
             } else {
                 // put to external data
                 activeDataCanister := await putDataInNewCanister(ekvm, key, value);
-            }
+            };
+
         }
         else if (forceNewExternal) {
             // test new external canister
@@ -185,6 +193,8 @@ module {
             var indexMap = BTree.init<Nat32, Principal>(null);
             var bucket = BucketModule.create(numBuckets, ?minMem);
             var localShards = BTree.init<Nat32, BTree.BTree<Text, Principal>>(null);
+            var mockMode = false;
+            var mockMem = Nat64.fromNat(0);
         };
     };
 };

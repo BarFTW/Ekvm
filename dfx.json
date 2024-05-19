@@ -3,6 +3,10 @@
     "db_test": {
       "type": "motoko",
       "main": "src/test.mo"
+    },
+    "circular": {
+      "type": "motoko",
+      "main": "src/circular/circular.mo"
     }
   },
   "defaults": {

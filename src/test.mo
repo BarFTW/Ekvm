@@ -20,7 +20,34 @@ actor class TestDBUser() = this {
 
     stable var db : ?EkvmModule.Ekvm = null;
 
+
+    type MyObject = {
+        id: Nat;
+        name: Text;
+        isActive: Bool;
+        arr : [Text];
+    };
+
+    type TextArray = [Text];
+
     public func init() {
+        let myObject: MyObject = {
+            id = 42;
+            name = "Motoko";
+            isActive = true;
+            arr = ["Hello", "World"];
+        };
+
+        let myArray = ["Goodbye","Cruel","World"];
+        // Serialize the object to a blob using to_candid
+        let blob: Blob = to_candid(myArray);
+        Debug.print("the blob " # debug_show(blob));
+
+        // Deserialize the blob back to an object using from_candid
+        let deserializedObject: ?TextArray = from_candid  blob;
+        Debug.print(debug_show(deserializedObject));
+
+
         Debug.print "----init----";
         let memoryUsage = StableMemory.stableVarQuery();
         let beforeSize = (await memoryUsage()).size;

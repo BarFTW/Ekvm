@@ -5,18 +5,22 @@ import Nat "mo:base/Nat";
 import Order "mo:base/Order";
 import StableMemory "mo:base/ExperimentalStableMemory";
 import Nat64 "mo:base/Nat64";
+import Nat8 "mo:base/Nat8";
+import Array "mo:base/Array";
+import Blob "mo:base/Blob";
+import Debug "mo:base/Debug";
 
 module {
-    public func key2Id(key: Text, numOfShards : Nat) : Nat32 {
+    public func key2Id(key: Text, numOfShards: Nat): Nat32 {
         let hash = Text.hash(key);
         hash % Nat32.fromNat(numOfShards);
     };
 
-    public func hashNat(n: Nat32) : Hash.Hash {
+    public func hashNat(n: Nat32): Hash.Hash {
         Text.hash(Nat32.toText(n));
     };
 
-    public func nat32toOrder(v1: Nat32, v2: Nat32) : Order.Order {
+    public func nat32toOrder(v1: Nat32, v2: Nat32): Order.Order {
         if (v1 > v2)
             return #greater;
         if (v2 > v1)
@@ -24,7 +28,7 @@ module {
         return #equal;
     };
 
-    public func textToOrder(t1: Text, t2: Text) : Order.Order {
+    public func textToOrder(t1: Text, t2: Text): Order.Order {
         if (Text.greater(t1, t2))
             return #greater;
         if (Text.less(t1, t2))
@@ -32,9 +36,16 @@ module {
         return #equal;
     };
 
-    public func checkMem(threshold: Nat64) : async Bool {
+    public func checkMem(threshold: Nat64, mockMode: Bool, mockMem: Nat64): async Bool {
+        if (mockMode) {
+            return mockMem < threshold;
+        };
         let memoryUsage = StableMemory.stableVarQuery();
+        Debug.print("Utils: checkMem: after memoryUsage");
+
         let currentMemory = (await memoryUsage()).size;
         currentMemory < threshold;
     };
+
+
 };
