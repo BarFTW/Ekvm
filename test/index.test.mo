@@ -1,4 +1,4 @@
-import EkvmModule "Ekvm";
+import EkvmModule "../src/Ekvm";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
 import Debug "mo:base/Debug";
@@ -9,11 +9,11 @@ import StableMemory "mo:base/ExperimentalStableMemory";
 import Nat64 "mo:base/Nat64";
 import Iter "mo:base/Iter";
 import Nat "mo:base/Nat";
-import Blob "mo:base/Blob";
+// import Blob "mo:base/Blob";
 import BTree "mo:stableheapbtreemap/BTree";
-import BucketModule "BucketModule";
-import BucketActor "BucketActor";
-import Utils "utils";
+// import BucketModule "../src/BucketModule";
+import BucketActor "../src/BucketActor";
+import Utils "../src/utils";
 
 
 actor class TestDBUser() = this {
