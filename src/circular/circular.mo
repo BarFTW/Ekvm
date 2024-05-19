@@ -16,18 +16,52 @@ import BucketActor "../BucketActor";
 import Utils "../utils";
 import Array "mo:base/Array";
 import { JSON; Candid; CBOR } "mo:serde";
+import { add; get; getKeys} "../collectionsModule";
 
 actor {
     stable var db : ?EkvmModule.Ekvm = null;
 
     type TextArray = [Text];
 
+    type Project = {
+        id: Text;
+        name: Text;
+        owner: Principal;
+        admins: [Principal];
+    };
 
     public shared (msg) func init() {
         let myPrincipal = msg.caller;
         db := ?EkvmModule.create(100, 40000, myPrincipal, myPrincipal, myPrincipal);
     };
 
+    public func createProject(project: Project) {
+        switch (db) {
+            case (?ekvm) {
+                 let projectBlob: Blob = to_candid(project);
+                ignore await add(ekvm, project.id,  "projects", ["allProjects", "projectsOf:"# Principal.toText(project.owner)], projectBlob);
+            };
+            case (_) {
+                Debug.print("not initialized!");
+                // return false;
+            };
+        };
+    };
+
+    public func getProjectIds(): async ?TextArray {
+        switch (db) {
+            case (?ekvm) {
+                let all = await getKeys(ekvm, "allProjects");
+                let aas = await getKeys(ekvm, "projectsOf:aaaaa-aa");
+                Debug.print("aa's " # debug_show(aas));
+                all;
+            };
+            case (_) {
+                Debug.print("not initialized!");
+                null;
+            };
+        };
+    };
 
     public func createWhiteLabel(id : Text, name : Text) : async Bool {
         Debug.print("Creating white label with name: " # name # " and id: " # id);
