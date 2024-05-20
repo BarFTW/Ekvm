@@ -32,9 +32,6 @@ module {
         var mockMem: Nat64;
     };
 
-    // public func setMockMode(currentSize: Nat64) {
-    //     Utils.setMockMode(currentSize);
-    // };
 
     public type EKVDB = {
         whoManages: (key:Text) -> ?Principal;
@@ -222,45 +219,6 @@ module {
         };
     };
 
-    public func init(
-        numBuckets: Nat,
-        minMem: Nat64,
-        indexPrincipal: Principal,
-        activeBucketCanister: Principal,
-        activeDataCanister: Principal
-    ) : (EKVDB, Ekvm) {
-        let new :Ekvm = {
-            var numBuckets = numBuckets;
-            var minMem = minMem;
-            var indexPrincipal = indexPrincipal;
-            var activeBucketCanister = activeBucketCanister;
-            var activeDataCanister = activeDataCanister;
-            var indexMap = BTree.init<Nat32, Principal>(null);
-            var bucket = BucketModule.create(numBuckets, ?minMem);
-            var localShards = BTree.init<Nat32, BTree.BTree<Text, Principal>>(null);
-            var mockMode = false;
-            var mockMem = Nat64.fromNat(0);
-        };
-
-        (object {
-            /*
-             whoManages: (key:Text) -> ?Principal;
-        get: (key:Text) -> async ?Blob;
-        put: (key:Text, value: Blob, forceNewExternal: Bool) -> async Bool;
-            */
-            public func whoManages(key:Text) : ?Principal {
-                _whoManages(new, key);
-            };
-
-            public func get(key: Text) : async ?Blob {
-                await _get(new, key);
-            };
-
-            public func  put(key:Text, value: Blob, forceNewExternal: Bool) : async Bool {
-                await _put(new, key, value, forceNewExternal);
-            };
-        }, new);
-    };
 
     public func create(
         numBuckets: Nat,

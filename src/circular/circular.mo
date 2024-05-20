@@ -1,3 +1,4 @@
+// import EkvmModule "../Ekvm";
 import EkvmModule "../Ekvm";
 import Principal "mo:base/Principal";
 import Text "mo:base/Text";
@@ -16,7 +17,6 @@ import BucketActor "../BucketActor";
 import Utils "../utils";
 import Array "mo:base/Array";
 import { JSON; Candid; CBOR } "mo:serde";
-// import { add; get; getKeys} "../collectionsModule";
 import whiteLables "whiteLabels";
 import Collection "../collectionsModule";
 actor {
