@@ -16,15 +16,15 @@ import BucketActor "../BucketActor";
 import Utils "../utils";
 import Array "mo:base/Array";
 import { JSON; Candid; CBOR } "mo:serde";
-import { add; get; getKeys} "../collectionsModule";
+// import { add; get; getKeys} "../collectionsModule";
 import whiteLables "whiteLabels";
-
+import Collection "../collectionsModule";
 actor {
     stable var db : ?EkvmModule.Ekvm = null;
     
      var kv : EkvmModule.EKVDB = EkvmModule.getDB(db);
 
-
+    var cols = Collection.init(kv);
 
 
     stable var gs : ?whiteLables.ComplexState = null;
@@ -139,53 +139,31 @@ actor {
 
 
     public func createProject(project: Project) {
-        switch (db) {
-            case (?ekvm) {
-                let projectBlob: Blob = to_candid(project);
-                let principals = Array.append([project.owner], project.admins);
-                let indexes: [Text] = Array.map<Principal, Text>(principals, func p = "projectsOf:"# Principal.toText(p));
+        let projectBlob: Blob = to_candid(project);
+        let principals = Array.append([project.owner], project.admins);
+        let indexes: [Text] = Array.map<Principal, Text>(principals, func p = "projectsOf:"# Principal.toText(p));
 
-                //  for (admin in project.admins.vals()) {
-                //     Array.append(indexes, [["projectsOf:"# Principal.toText(project.owner)]])
-                //  }
-                ignore await add(ekvm, project.id,  "projects", Array.append(["allProjects"],indexes), projectBlob);
-            };
-            case (_) {
-                Debug.print("not initialized!");
-                // return false;
-            };
-        };
+        //  for (admin in project.admins.vals()) {
+        //     Array.append(indexes, [["projectsOf:"# Principal.toText(project.owner)]])
+        //  }
+
+        
+        ignore await cols.add(project.id,  "projects", Array.append(["allProjects"],indexes), projectBlob);
     };
 
     public func getProjectIdsFor(principal: ?Principal): async ?TextArray {
-        switch (db) {
-            case (?ekvm) {
-                var key:Text = "";
-                switch (principal) {
-                    case (?p) {
-                        key := "projectsOf:" # Principal.toText(p);
-                    };
-                    case (_) {
-                        key := "allProjects";
-                    };
-                };
-                await getKeys(ekvm, key);
-                // let aas = await getKeys(ekvm, "projectsOf:aaaaa-aa");
-                // Debug.print("aa's " # debug_show(aas));
-                // all;
+        var key:Text = "";
+        switch (principal) {
+            case (?p) {
+                key := "projectsOf:" # Principal.toText(p);
             };
             case (_) {
-                Debug.print("not initialized!");
-                null;
+                key := "allProjects";
             };
         };
+        await cols.getKeys(key);
     };
 
-    // public func getProject(id: Text): async Project {
-    //     switch (db) {
-
-    //     }
-    // }
 
     public func createWhiteLabel(id : Text, name : Text) : async Bool {
         Debug.print("Creating white label with name: " # name # " and id: " # id);
