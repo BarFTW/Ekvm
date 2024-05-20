@@ -36,14 +36,20 @@ module {
     //     Utils.setMockMode(currentSize);
     // };
 
+    public type EKVDB = {
+        whoManages: (key:Text) -> ?Principal;
+        get: (key:Text) -> async ?Blob;
+        put: (key:Text, value: Blob, forceNewExternal: Bool) -> async Bool;
+    };
+
 // should be private
-    public func whoManages(ekvm: Ekvm, key: Text) : ?Principal {
+    public func _whoManages(ekvm: Ekvm, key: Text) : ?Principal {
         let id = Utils.key2Id(key, ekvm.numBuckets);
         BTree.get<Nat32, Principal>(ekvm.indexMap, Utils.nat32toOrder, id);
     };
 
-    public func get(ekvm: Ekvm, key: Text) : async ?Blob {
-        switch(whoManages(ekvm, key)) {
+    public func _get(ekvm: Ekvm, key: Text) : async ?Blob {
+        switch(_whoManages(ekvm, key)) {
             case(?shardLocation) { 
                 if (Principal.equal(shardLocation, ekvm.indexPrincipal)) {
                     Debug.print("Local shard");
@@ -117,7 +123,7 @@ module {
         Principal.fromActor(bucketActor);
     };
 
-    public func put(ekvm: Ekvm, key: Text, value: Blob, forceNewExternal: Bool) : async Bool {
+    public func _put(ekvm: Ekvm, key: Text, value: Blob, forceNewExternal: Bool) : async Bool {
         var activeDataCanister = ekvm.activeDataCanister;
         // put data in active data canister
         if (not forceNewExternal and Principal.equal(activeDataCanister, ekvm.indexPrincipal)) {
@@ -154,7 +160,7 @@ module {
         };
 
         // set data location and shard manager
-        let shardLocation = switch(whoManages(ekvm, key)) {
+        let shardLocation = switch(_whoManages(ekvm, key)) {
             case(?shardLocation) shardLocation;
             case(_) {
                 let id : Nat32 = Utils.key2Id(key, ekvm.numBuckets);
@@ -175,6 +181,85 @@ module {
             let hasMemory =
                 await shardCanister.addKeyToShard(key, activeDataCanister);
         };
+    };
+
+    public func getDB(state: ?Ekvm) : EKVDB {
+        switch (state) {
+            case (?s) {
+                object {
+                    public func whoManages(key:Text) : ?Principal {
+                        _whoManages(s, key);
+                    };
+
+                    public func get(key: Text) : async ?Blob {
+                        await _get(s, key);
+                    };
+
+                    public func  put(key:Text, value: Blob, forceNewExternal: Bool) : async Bool {
+                        await _put(s, key, value, forceNewExternal);
+                    };
+                };
+            };
+            case (_) {
+                object {
+                    public func whoManages(key:Text) : ?Principal {
+                        Debug.print("not initialized");
+                        null;
+                    };
+
+                    public func get(key: Text) : async ?Blob {
+                        Debug.print("not initialized");
+                        null;
+                    };
+
+                    public func  put(key:Text, value: Blob, forceNewExternal: Bool) : async Bool {
+                        Debug.print("not initialized");
+                        false;
+                    };
+
+                };
+            };
+        };
+    };
+
+    public func init(
+        numBuckets: Nat,
+        minMem: Nat64,
+        indexPrincipal: Principal,
+        activeBucketCanister: Principal,
+        activeDataCanister: Principal
+    ) : (EKVDB, Ekvm) {
+        let new :Ekvm = {
+            var numBuckets = numBuckets;
+            var minMem = minMem;
+            var indexPrincipal = indexPrincipal;
+            var activeBucketCanister = activeBucketCanister;
+            var activeDataCanister = activeDataCanister;
+            var indexMap = BTree.init<Nat32, Principal>(null);
+            var bucket = BucketModule.create(numBuckets, ?minMem);
+            var localShards = BTree.init<Nat32, BTree.BTree<Text, Principal>>(null);
+            var mockMode = false;
+            var mockMem = Nat64.fromNat(0);
+        };
+
+        (object {
+            /*
+             whoManages: (key:Text) -> ?Principal;
+        get: (key:Text) -> async ?Blob;
+        put: (key:Text, value: Blob, forceNewExternal: Bool) -> async Bool;
+            */
+            public func whoManages(key:Text) : ?Principal {
+                _whoManages(new, key);
+            };
+
+            public func get(key: Text) : async ?Blob {
+                await _get(new, key);
+            };
+
+            public func  put(key:Text, value: Blob, forceNewExternal: Bool) : async Bool {
+                await _put(new, key, value, forceNewExternal);
+            };
+        }, new);
     };
 
     public func create(

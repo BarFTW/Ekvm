@@ -21,6 +21,14 @@ import whiteLables "whiteLabels";
 
 actor {
     stable var db : ?EkvmModule.Ekvm = null;
+    
+     var kv : EkvmModule.EKVDB = EkvmModule.getDB(db);
+
+
+
+
+    stable var gs : ?whiteLables.ComplexState = null;
+    var greeter: whiteLables.Greeter = whiteLables.init(null);
 
     type TextArray = [Text];
 
@@ -31,9 +39,93 @@ actor {
         admins: [Principal];
     };
 
+    // stable var newDB = 
+    // public shared (msg) func new() {
+
+    // }
+
+    // stable var state : ?whiteLables.BigState = null;
+    // stable var greeter: ?whiteLables.Greeter = null;
+
+    public func sayHello() {
+        greeter.sayHello();
+    };
+
+
+    public func store(key:Text, val: Text) {
+        let valBlob = to_candid(val);
+        ignore await kv.put(key, valBlob, false);
+    };
+
+    public func get2(key:Text): async ?Text {
+        let valBlob = await kv.get(key);
+        switch (valBlob) {
+            case (?b) {
+                let val: ?Text = from_candid b;
+            };
+            case (_) {
+                null;
+            };
+        };
+        
+    };
+
+
+    // public shared (msg) func init2() {
+    //     switch(dbState) {
+    //         case (?db) {
+
+    //         }
+    //     }
+    //     let myPrincipal = msg.caller;
+    //     let (ekvdb, ekvm) = EkvmModule.init(100, 40000, myPrincipal, myPrincipal, myPrincipal);
+
+    //     dbState:= ekvm;
+    //     db2:= ekvm;
+    //     // db := ?EkvmModule.create(100, 40000, myPrincipal, myPrincipal, myPrincipal);
+    //     gs := ?{
+    //         var text = "David";
+    //         var blob = to_candid("Moshe");
+    //     };
+
+
+    //     greeter := whiteLables.init(gs);
+    //     greeter.sayHello();
+    //     // let b = BTree.init<Nat32, BTree.BTree<Text, Principal>>(null);
+    //     // let w = WhiteLabels(b);
+    //     // switch (db) {
+    //     //     case (?ekvm) {
+    //     //         let whiteLabel = WhiteLabels(ekvm);
+    //     //         Debug.print("whiteLable principal: " # Principal.toText(Principal.fromActor(whiteLabel)));
+    //     //     };
+    //     //     case (_) {
+    //     //         Debug.print("Failed to initialize db");
+    //     //     };
+    //     // };
+    // };
+
+    // public func StoreSomething(key: Text,val: Text) {
+    //     await 
+    // }
+
+    public func useState() {
+        kv := EkvmModule.getDB(db);
+    };
+
     public shared (msg) func init() {
         let myPrincipal = msg.caller;
         db := ?EkvmModule.create(100, 40000, myPrincipal, myPrincipal, myPrincipal);
+        kv := EkvmModule.getDB(db);
+        gs := ?{
+            var text = "David";
+            var blob = to_candid("Moshe");
+        };
+
+
+        greeter := whiteLables.init(gs);
+        greeter.sayHello();
+        // let b = BTree.init<Nat32, BTree.BTree<Text, Principal>>(null);
+        // let w = WhiteLabels(b);
         // switch (db) {
         //     case (?ekvm) {
         //         let whiteLabel = WhiteLabels(ekvm);
@@ -44,6 +136,7 @@ actor {
         //     };
         // };
     };
+
 
     public func createProject(project: Project) {
         switch (db) {
@@ -98,8 +191,8 @@ actor {
         Debug.print("Creating white label with name: " # name # " and id: " # id);
         switch (db) {
             case (?ekvm) {
-                ignore await EkvmModule.put(ekvm, "whiteLabel:" # id, Text.encodeUtf8(name), false);
-                switch (await EkvmModule.get(ekvm, "whiteLabelKeys")) {
+                ignore await EkvmModule._put(ekvm, "whiteLabel:" # id, Text.encodeUtf8(name), false);
+                switch (await EkvmModule._get(ekvm, "whiteLabelKeys")) {
                     case (?keysBlob) {
                         let keys : ?TextArray = from_candid  keysBlob;
                         Debug.print("the keys: " # debug_show(keys) );
@@ -107,7 +200,7 @@ actor {
                             case (?keysArray) {
                                 let newKeys = Array.append(keysArray, [id]);
                                  let keysArrayBlob: Blob = to_candid(newKeys);
-                                ignore await EkvmModule.put(ekvm, "whiteLabelKeys", keysArrayBlob, false);
+                                ignore await EkvmModule._put(ekvm, "whiteLabelKeys", keysArrayBlob, false);
                                 return true;
                             };
                             case (_) {
@@ -115,7 +208,7 @@ actor {
                                 Debug.print("Failed to get whiteLabelKeys");
                                 let keysArray : TextArray = [id];
                                  let keysArrayBlob: Blob = to_candid(keysArray);
-                                ignore await EkvmModule.put(ekvm, "whiteLabelKeys", keysArrayBlob, false);
+                                ignore await EkvmModule._put(ekvm, "whiteLabelKeys", keysArrayBlob, false);
                                 return true;
                             };
                         };
@@ -125,7 +218,7 @@ actor {
                         Debug.print("Failed to get whiteLabelKeys");
                         let keysArray : TextArray = [id];
                         let keysArrayBlob = to_candid (keysArray);
-                        await EkvmModule.put(ekvm, "whiteLabelKeys", keysArrayBlob, false);
+                        await EkvmModule._put(ekvm, "whiteLabelKeys", keysArrayBlob, false);
                     };
                 };
             };
