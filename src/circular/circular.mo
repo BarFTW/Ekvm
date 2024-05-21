@@ -28,7 +28,7 @@ actor {
     var kv : EkvmModule.EKVDB = EkvmModule.getDB(db);
 
     // var cols = Collection.init(kv);
-    var whiteLabels = EMModule.EntityManager(kv, "whiteLabels",[],[
+    var whiteLabels = EMModule.EntityManager(kv, "whiteLabels",["id"],[
         [(#Principal, 0)], //WL by principal
         [] // all WLs
     ]);
@@ -131,8 +131,8 @@ actor {
         
     };
 
-    public func getProject(id : Text, wlId : Text) : async ?Project {
-        let b = await projects._get(id, wlId);
+    public func getProject(key : Text) : async ?Project {
+        let b = await projects.get(key);
         switch (b) {
             case (?blob) from_candid blob;
             case (_) null;
@@ -141,15 +141,22 @@ actor {
 
     public func createWhiteLabel(wl : WhiteLabel) : async () {
         let wlBlob = to_candid (wl);
-        await whiteLabels.createEntity(wl.entity, wlBlob);
+        await whiteLabels.createEntityNew(wl.entity, wlBlob);
     };
 
-    public func getWhiteLabelIdsFor(principal : ?Principal, wlId : ?Text) : async ?[Text] {
-        await whiteLabels.getEntityIdsFor(principal, wlId);
+    public func getWhiteLabelIdsFor(principal : ?Principal) : async ?[Text] {
+        switch (principal) {
+            case (?p) {
+                await whiteLabels.getEntityKeysByIndex(principal, [],[(#Principal,0)]);
+            };
+            case (_) {
+                await whiteLabels.getEntityKeysByIndex(null, [],[]);
+            };
+        };
     };
 
-    public func getWhiteLabel(id: Text): async ?WhiteLabel {
-        let b = await whiteLabels._get(id, id);
+    public func getWhiteLabel(key: Text): async ?WhiteLabel {
+        let b = await whiteLabels.get(key);
         switch (b) {
             case (?blob) from_candid blob;
             case (_) null;
