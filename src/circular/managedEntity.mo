@@ -30,47 +30,48 @@ module {
         admins : [Principal];
     };
 
-    public type EntityManager = {
-        createEntity: (entity : ManagedEntity, objBlob : Blob) -> async ();
-        getEntityIdsFor(principal : ?Principal, wlId : ?Text) : async ?[Text];
-    };
+    public class EntityManager(kv : EkvmModule.EKVDB, typeName : Text) = {
+        //     createEntity: (entity : ManagedEntity, objBlob : Blob) -> async ();
+        //     getEntityIdsFor(principal : ?Principal, wlId : ?Text) : async ?[Text];
+        // };
 
-
-    public func init(kv: EkvmModule.EKVDB, typeName:Text): EntityManager {
-        var cols = Collection.init(kv);
-        object {
-            public func createEntity(entity : ManagedEntity, objBlob : Blob) : async () {
-                let principals = Array.append([entity.owner], entity.admins);
-                let indexes : [Text] = Array.map<Principal, Text>(principals, func p = "wlId:" # entity.wlId # "-" # typeName # "Of:" # Principal.toText(p));
-                ignore await cols.add(entity.id, "wlId:" # entity.wlId# "-"#typeName, Array.append(["all-" # typeName, "wlId:" # entity.wlId # "-all-" #typeName], indexes), objBlob);
-            };
-        
-
-            public func getEntityIdsFor(principal : ?Principal, wlId : ?Text) : async ?[Text] {
-                var key : Text = "";
-                switch (principal, wlId) {
-
-                    case (?p, ?wlId) {
-                        key := "wlId:" # wlId # "-" #typeName # "Of:" # Principal.toText(p);
-                    };
-
-                    case (?p, _) {
-                        return null;
-                    };
-
-                    case (_,?wlId) {
-                        key := "wlId:" # wlId # "-all-" # typeName;
-                    };
-
-                    case (_, _) {
-                        key := "all-" # typeName;
-                    };
-
-                };
-                await cols.getKeys(key);
-            };
+        // public func init(kv: EkvmModule.EKVDB, typeName:Text): EntityManager {
+            var cols = Collection.init(kv);
+        //     object {
+        public func createEntity(entity : ManagedEntity, objBlob : Blob) : async () {
+            let principals = Array.append([entity.owner], entity.admins);
+            let indexes : [Text] = Array.map<Principal, Text>(principals, func p = "wlId:" # entity.wlId # "-" # typeName # "Of:" # Principal.toText(p));
+            ignore await cols.add(entity.id, "wlId:" # entity.wlId# "-"#typeName, Array.append(["all-" # typeName, "wlId:" # entity.wlId # "-all-" #typeName], indexes), objBlob);
         };
 
+        public func getEntityIdsFor(principal : ?Principal, wlId : ?Text) : async ?[Text] {
+            var key : Text = "";
+            switch (principal, wlId) {
+
+                case (?p, ?wlId) {
+                    key := "wlId:" # wlId # "-" #typeName # "Of:" # Principal.toText(p);
+                };
+
+                case (?p, _) {
+                    return null;
+                };
+
+                case (_, ?wlId) {
+                    key := "wlId:" # wlId # "-all-" # typeName;
+                };
+
+                case (_, _) {
+                    key := "all-" # typeName;
+                };
+
+            };
+            await cols.getKeys(key);
+        };
+
+
+        public func get(id: Text, wlId: Text): async ?Blob {
+            await cols.get("wlId:" #wlId # "-" # typeName, id);
+        }
     };
 
 };
