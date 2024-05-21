@@ -20,6 +20,8 @@ import Array "mo:base/Array";
 import { JSON; Candid; CBOR } "mo:serde";
 // import whiteLables "whiteLabels";
 import Collection "../collectionsModule";
+import EMModule "managedEntity";
+
 actor {
 
     // type r = Result.Result<Text, Text>;
@@ -28,6 +30,9 @@ actor {
     var kv : EkvmModule.EKVDB = EkvmModule.getDB(db);
 
     var cols = Collection.init(kv);
+    var whiteLabels = EMModule.init(kv, "whiteLabels");
+    var projects = EMModule.init(kv, "projects");
+
 
     // stable var gs : ?whiteLables.ComplexState = null;
     // var greeter: whiteLables.Greeter = whiteLables.init(null);
@@ -117,9 +122,18 @@ actor {
         await cols.getKeys(key);
     };
 
+    // public func createProject(project : Project) : async () {
+    //     let projectBlob : Blob = to_candid (project);
+    //     ignore await createEntity(project.entity, "projects", projectBlob);
+    //     // let principals = Array.append([project.entity.owner], project.entity.admins);
+    //     // let indexes: [Text] = Array.map<Principal, Text>(principals, func p = "projectsOf:"# Principal.toText(p));
+
+    //     // ignore await cols.add(project.id,  "projects", Array.append(["allProjects"],indexes), projectBlob);
+    // };
+
     public func createProject(project : Project) : async () {
         let projectBlob : Blob = to_candid (project);
-        ignore await createEntity(project.entity, "projects", projectBlob);
+        ignore await projects.createEntity(project.entity, projectBlob);
         // let principals = Array.append([project.entity.owner], project.entity.admins);
         // let indexes: [Text] = Array.map<Principal, Text>(principals, func p = "projectsOf:"# Principal.toText(p));
 
@@ -127,7 +141,7 @@ actor {
     };
 
     public func getProjectIdsFor(principal : ?Principal, wlId : ?Text) : async ?TextArray {
-        await getEntityIdsFor(principal, "projects", wlId);
+        await projects.getEntityIdsFor(principal, wlId);
     };
 
     public func getProject(id : Text, wlId : Text) : async ?Project {
