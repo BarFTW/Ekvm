@@ -28,8 +28,16 @@ actor {
     var kv : EkvmModule.EKVDB = EkvmModule.getDB(db);
 
     // var cols = Collection.init(kv);
-    var whiteLabels = EMModule.EntityManager(kv, "whiteLabels",[],[[]]);
-    var projects = EMModule.EntityManager(kv, "projects",["wl","id"],[[]]);
+    var whiteLabels = EMModule.EntityManager(kv, "whiteLabels",[],[
+        [(#Principal, 0)], //WL by principal
+        [] // all WLs
+    ]);
+    var projects = EMModule.EntityManager(kv, "projects",["wl","id"],[
+        [(#Principal, 0)], //projects by principal
+        [(#Principal, 0), (#IdPart, 0)], //project by principal and WL,
+        [(#IdPart, 0)],
+        [] // all projects
+    ]);
     var campaigns = EMModule.EntityManager(kv, "campaigns",["wl","proj", "id"],[
         [(#Principal,0),(#IdPart,0), (#IdPart,1)], //all campaigns by principal, wl and project
         [(#Principal,0),(#IdPart,1)], // all campaigns by principal and project
@@ -72,7 +80,7 @@ actor {
 
     public func createProject(project : Project) : async () {
         let projectBlob : Blob = to_candid (project);
-        await projects.createEntity(project.entity, projectBlob);
+        await projects.createEntityNew(project.entity, projectBlob);
     };
 
     public func createCampaign(campaign: Campaign) : async () {
@@ -100,8 +108,27 @@ actor {
         await campaigns.getEntityKeysByIndex(null, [wlId], [(#IdPart,0)]);
     };
 
-    public func getProjectIdsFor(principal : ?Principal, wlId : ?Text) : async ?[Text] {
-        await projects.getEntityIdsFor(principal, wlId);
+    public func getCampaignIdsByWLandProj(wlId: Text, projectId : Text) : async ?[Text] {
+        await campaigns.getEntityKeysByIndex(null, [wlId, projectId], [(#IdPart,0), (#IdPart,1)]);
+    };
+
+    public func getProjectKeysFor(principal : ?Principal, wlId : ?Text) : async ?[Text] {
+        switch(principal, wlId) {
+            case (?p, ?w) {
+                await projects.getEntityKeysByIndex(principal, [w], [(#Principal,0),(#IdPart,0)]);
+            };
+            case (?p, _) {
+                await projects.getEntityKeysByIndex(principal, [], [(#Principal,0)]);
+            };
+            case (_, ?w) {
+                await projects.getEntityKeysByIndex(null, [w], [(#IdPart,0)]);
+            };
+            case (_,_) {
+                await projects.getEntityKeysByIndex(null, [], []);
+            };
+
+        };
+        
     };
 
     public func getProject(id : Text, wlId : Text) : async ?Project {
