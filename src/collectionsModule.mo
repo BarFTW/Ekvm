@@ -52,7 +52,7 @@ module {
             };
 
             public func get(keyPath : Text, key : Text) : async ?Blob {
-                let fullKey = keyPath;
+                let fullKey = keyPath # ":" # key;
                 await kv.get(fullKey);
             };
 
