@@ -11,14 +11,15 @@ module {
     public type Collection = {
         add : (key : Text, dataPath : Text, indexes : [Text], value : Blob) -> async Bool;
         get : (keyPath : Text, key : Text) -> async ?Blob;
+        getNew : (keyPath : Text) -> async ?Blob;
         getKeys : (keyPath : Text) -> async ?[Text];
     };
 
     public func init(kv : EkvmModule.EKVDB) : Collection {
         object {
-            public func add(key : Text, dataPath : Text, indexes : [Text], blob : Blob) : async Bool {
-                Debug.print("Adding item with key: " # key # " to collection: " # dataPath);
-                let fullKey = dataPath # ":" # key;
+            public func add(_:Text, dataPath : Text, indexes : [Text], blob : Blob) : async Bool {
+                Debug.print("Adding item to collection: " # dataPath);
+                let fullKey = dataPath;// # ":" # key;
                 ignore await kv.put(fullKey, blob, false);
                 for (indexPath in indexes.vals()) {
                     Debug.print("adding indexes: " # debug_show (indexPath));
@@ -28,13 +29,13 @@ module {
                             let keys : ?TextArray = from_candid keysBlob;
                             switch (keys) {
                                 case (?keysArray) {
-                                    let newKeys = Array.append<Text>(keysArray, [key]);
+                                    let newKeys = Array.append<Text>(keysArray, [dataPath]);
                                     let keysArrayBlob : Blob = to_candid (newKeys);
                                     ignore await kv.put(keysKey, keysArrayBlob, false);
                                 };
                                 case null {
                                     Debug.print("Failed to decode keys, initializing new keys array");
-                                    let keysArray : TextArray = [key];
+                                    let keysArray : TextArray = [dataPath];
                                     let keysArrayBlob : Blob = to_candid (keysArray);
                                     ignore await kv.put(keysKey, keysArrayBlob, false);
                                 };
@@ -42,7 +43,7 @@ module {
                         };
                         case null {
                             Debug.print("No existing keys found, initializing new keys array");
-                            let keysArray : [Text] = [key];
+                            let keysArray : [Text] = [dataPath];
                             let keysArrayBlob : Blob = to_candid (keysArray);
                             ignore await kv.put(keysKey, keysArrayBlob, false);
                         };
@@ -53,6 +54,11 @@ module {
 
             public func get(keyPath : Text, key : Text) : async ?Blob {
                 let fullKey = keyPath # ":" # key;
+                await kv.get(fullKey);
+            };
+
+            public func getNew(keyPath : Text) : async ?Blob {
+                let fullKey = keyPath ;// # ":" # key;
                 await kv.get(fullKey);
             };
 

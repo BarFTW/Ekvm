@@ -28,9 +28,20 @@ actor {
     var kv : EkvmModule.EKVDB = EkvmModule.getDB(db);
 
     // var cols = Collection.init(kv);
-    var whiteLabels = EMModule.EntityManager(kv, "whiteLabels");
-    var projects = EMModule.EntityManager(kv, "projects");
+    var whiteLabels = EMModule.EntityManager(kv, "whiteLabels",[],[[]]);
+    var projects = EMModule.EntityManager(kv, "projects",["wl","id"],[[]]);
+    var campaigns = EMModule.EntityManager(kv, "campaigns",["wl","proj", "id"],[
+        [(#Principal,0),(#IdPart,0), (#IdPart,1)], //all campaigns by principal, wl and project
+        [(#Principal,0),(#IdPart,1)], // all campaigns by principal and project
+        [(#IdPart,0)] //all campaigns by wl
+    ]);
 
+    public type Campaign = {
+        entity :  EMModule.ManagedEntity;
+        dateFrom: Text;
+        dateTo: Text;
+        active: Bool;
+    };
 
     public type ProjectData = {
         homePage : Text;
@@ -64,12 +75,37 @@ actor {
         await projects.createEntity(project.entity, projectBlob);
     };
 
+    public func createCampaign(campaign: Campaign) : async () {
+        let campaignBlob : Blob = to_candid (campaign);
+        await campaigns.createEntityNew(campaign.entity, campaignBlob);
+    };
+
+    public func getCampaign(ids:[Text]): async ?Campaign {
+        let b = await campaigns.getNew(ids);
+         switch (b) {
+            case (?blob) from_candid blob;
+            case (_) null;
+        };
+    };
+
+    public func getCampaignByKey(key:Text): async ?Campaign {
+        let b = await campaigns.get(key);
+         switch (b) {
+            case (?blob) from_candid blob;
+            case (_) null;
+        };
+    };
+
+    public func getCampaignIdsByWL(wlId: Text) : async ?[Text] {
+        await campaigns.getEntityKeysByIndex(null, [wlId], [(#IdPart,0)]);
+    };
+
     public func getProjectIdsFor(principal : ?Principal, wlId : ?Text) : async ?[Text] {
         await projects.getEntityIdsFor(principal, wlId);
     };
 
     public func getProject(id : Text, wlId : Text) : async ?Project {
-        let b = await projects.get(id, wlId);
+        let b = await projects._get(id, wlId);
         switch (b) {
             case (?blob) from_candid blob;
             case (_) null;
@@ -86,7 +122,7 @@ actor {
     };
 
     public func getWhiteLabel(id: Text): async ?WhiteLabel {
-        let b = await whiteLabels.get(id, id);
+        let b = await whiteLabels._get(id, id);
         switch (b) {
             case (?blob) from_candid blob;
             case (_) null;
