@@ -12,6 +12,7 @@ import Debug "mo:base/Debug";
 // import Nat "mo:base/Nat";
 // import Result "mo:base/Result";
 import Blob "mo:base/Blob";
+import Buffer "mo:base/Buffer";
 // import BTree "mo:stableheapbtreemap/BTree";
 // import BucketModule "../BucketModule";
 // import BucketActor "../BucketActor";
@@ -20,6 +21,10 @@ import Array "mo:base/Array";
 // import { JSON; Candid; CBOR } "mo:serde";
 import Collection "../collectionsModule";
 import EMModule "managedEntity";
+import Simple "deals/simple";
+import DealTypes "deals/types";
+import { JSON;  } "mo:serde";
+// import { DealCalculator; Reward} "deals/types";
 
 actor {
 
@@ -86,14 +91,14 @@ actor {
         count: Nat;
     };
 
-    public type DealCalculator = {
-        calculate: (Event, State: Blob) -> [Reward];
-    };
+    // public type DealCalculator = {
+    //     calculate: (Event, State: Blob) -> [Reward];
+    // };
 
     public type Offer = {
         entity : EMModule.ManagedEntity;
         calculatorActor: Principal;
-        offerData: Blob;
+        config: Blob;
     };
 
     public func useState() {
@@ -197,7 +202,102 @@ actor {
     };
 
 
-    public func CreateOffer(offer: Offer): async () {
+
+    public func CreateOffer(offer: Offer, configJson: Text): async () {
+        let #ok(blob) = JSON.fromText(configJson, null); 
+        Debug.print("blob: "# debug_show(blob));
+
+        let config: ?Simple.SimpleRevShareConfig = from_candid(blob);
+        switch (config) {
+            case (?c) {
+                let calc = Simple.SimpleRevShareDeal(c);
+                Debug.print("after create calc, offer:  "#debug_show(offer) );
+                let newOffer = { offer with config = blob };
+                Debug.print("new Offer " # debug_show(newOffer));
+                let b = to_candid(newOffer);
+                ignore await offers.createEntity(offer.entity, b);
+                Debug.print("After creating offer, b: "#debug_show(b));
+
+            };
+            case (_) {
+                Debug.trap("invalid config");
+            };
+        };
+        
+        Debug.print("config "# debug_show(config));
         let b = to_candid(offer);
     };
+
+     public func fetchOffer(key:Text) : async ?(Offer, Text, Text) {
+        let bOpt = await offers.get(key);
+        switch (bOpt) {
+            case (?b) {
+                let offerOpt: ?Offer = from_candid b;
+                switch (offerOpt) {
+                    case (?offer) {
+                        let #ok(text) = JSON.toText(offer.config, ["eventName","revShare","flat"], null);
+                        ?(offer,text,key);
+                    };
+                    case (_) null;
+                };
+            };
+            case (_) null;
+        };
+    };
+
+    public func getAllOffers(wl:Text): async [(Offer, Text, Text)] {
+
+        let keysOpt = await offers.getEntityKeysByIndex(null, [wl],[(#IdPart,0)]);
+        switch (keysOpt) {
+            case (?keys) {
+                let size = Array.size(keys);
+                let buff = Buffer.Buffer<(Offer, Text, Text)>(size);
+                for (key in keys.vals()) {
+                    let oOpt = await fetchOffer(key);
+                    switch (oOpt) {
+                        case (?o) buff.add(o);
+                        case (_) ();
+                    };
+                };
+                Buffer.toArray(buff);
+            };
+            case (_) {
+                [];
+            };
+        };
+
+    };
+
+    public func onEvent(event: DealTypes.Event, dealKey: Text): async [DealTypes.Reward] {
+        let tupOpt = await fetchOffer(dealKey);
+        switch (tupOpt) {
+            case (?(offer, config, _)) {
+                Debug.print("offer "#debug_show(offer));
+                let configO: ?Simple.SimpleRevShareConfig = from_candid(offer.config);
+                switch (configO) {
+                    case (?config) {
+                        let calc = Simple.SimpleRevShareDeal(config);
+                        Debug.print("after creating calc");
+                        let state  = DealTypes.DummyState();
+                        await calc.calculate(event, state);
+                    };
+                    case (_) {
+                        [];
+                    };
+                }
+            };
+            case (_) [];
+        }
+    };
+
+    public query func greet(greek: Bool): async Text  {
+        var g: Simple.Greeter = Simple.A("");
+        if (greek) {
+            g:= Simple.B("Yanis");
+        } else {
+            g:=Simple.A("Johnny");
+        };
+        g.sayHello();
+    };
+
 };
