@@ -35,7 +35,7 @@ actor {
     var projects = EMModule.EntityManager(kv, "projects",["wl","id"],[
         [(#Principal, 0)], //projects by principal
         [(#Principal, 0), (#IdPart, 0)], //project by principal and WL,
-        [(#IdPart, 0)],
+        [(#IdPart, 0)], // projects by WL
         [] // all projects
     ]);
     var campaigns = EMModule.EntityManager(kv, "campaigns",["wl","proj", "id"],[
@@ -44,11 +44,19 @@ actor {
         [(#IdPart,0)] //all campaigns by wl
     ]);
 
+    var offers = EMModule.EntityManager(kv, "offers",["wl","proj", "cmp", "id"],[
+        [(#Principal,0),(#IdPart,0), (#IdPart,1)], //all campaigns by principal, wl and project
+        [(#Principal,0),(#IdPart,1)], // all campaigns by principal and project
+        [(#IdPart,0)] //all campaigns by wl
+    ]);
+
     public type Campaign = {
         entity :  EMModule.ManagedEntity;
+        name : Text;
         dateFrom: Text;
         dateTo: Text;
         active: Bool;
+
     };
 
     public type ProjectData = {
@@ -58,12 +66,34 @@ actor {
 
     public type Project = {
         entity : EMModule.ManagedEntity;
+        name : Text;
         additionalData : ProjectData;
     };
 
     public type WhiteLabel = {
+        name : Text;
         entity : EMModule.ManagedEntity;
         members : [Text];
+    };
+
+    public type Reward = {
+        amount: Nat;
+    };
+
+    public type Event = {
+        name: Text;
+        amount: Nat;
+        count: Nat;
+    };
+
+    public type DealCalculator = {
+        calculate: (Event, State: Blob) -> [Reward];
+    };
+
+    public type Offer = {
+        entity : EMModule.ManagedEntity;
+        calculatorActor: Principal;
+        offerData: Blob;
     };
 
     public func useState() {
@@ -77,19 +107,22 @@ actor {
         Debug.print("after init db: "#debug_show(db));
     };
 
+    public query func getCampaignIdsFromKey(key: Text): async [Text] {
+        campaigns.getIdsFromKey(key);
+    };
 
     public func createProject(project : Project) : async () {
         let projectBlob : Blob = to_candid (project);
-        await projects.createEntityNew(project.entity, projectBlob);
+        await projects.createEntity(project.entity, projectBlob);
     };
 
     public func createCampaign(campaign: Campaign) : async () {
         let campaignBlob : Blob = to_candid (campaign);
-        await campaigns.createEntityNew(campaign.entity, campaignBlob);
+        await campaigns.createEntity(campaign.entity, campaignBlob);
     };
 
     public func getCampaign(ids:[Text]): async ?Campaign {
-        let b = await campaigns.getNew(ids);
+        let b = await campaigns.getByIds(ids);
          switch (b) {
             case (?blob) from_candid blob;
             case (_) null;
@@ -141,7 +174,7 @@ actor {
 
     public func createWhiteLabel(wl : WhiteLabel) : async () {
         let wlBlob = to_candid (wl);
-        await whiteLabels.createEntityNew(wl.entity, wlBlob);
+        await whiteLabels.createEntity(wl.entity, wlBlob);
     };
 
     public func getWhiteLabelIdsFor(principal : ?Principal) : async ?[Text] {
@@ -161,5 +194,10 @@ actor {
             case (?blob) from_candid blob;
             case (_) null;
         };
+    };
+
+
+    public func CreateOffer(offer: Offer): async () {
+        let b = to_candid(offer);
     };
 };

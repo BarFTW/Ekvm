@@ -9,15 +9,15 @@ module {
     type TextArray = [Text];
 
     public type Collection = {
-        add : (key : Text, dataPath : Text, indexes : [Text], value : Blob) -> async Bool;
-        get : (keyPath : Text, key : Text) -> async ?Blob;
-        getNew : (keyPath : Text) -> async ?Blob;
+        add : (dataPath : Text, indexes : [Text], value : Blob) -> async Bool;
+        // get : (keyPath : Text, key : Text) -> async ?Blob;
+        get : (keyPath : Text) -> async ?Blob;
         getKeys : (keyPath : Text) -> async ?[Text];
     };
 
     public func init(kv : EkvmModule.EKVDB) : Collection {
         object {
-            public func add(_:Text, dataPath : Text, indexes : [Text], blob : Blob) : async Bool {
+            public func add(dataPath : Text, indexes : [Text], blob : Blob) : async Bool {
                 Debug.print("Adding item to collection: " # dataPath);
                 let fullKey = dataPath;// # ":" # key;
                 ignore await kv.put(fullKey, blob, false);
@@ -52,12 +52,12 @@ module {
                 return true;
             };
 
-            public func get(keyPath : Text, key : Text) : async ?Blob {
-                let fullKey = keyPath # ":" # key;
-                await kv.get(fullKey);
-            };
+            // public func get(keyPath : Text, key : Text) : async ?Blob {
+            //     let fullKey = keyPath # ":" # key;
+            //     await kv.get(fullKey);
+            // };
 
-            public func getNew(keyPath : Text) : async ?Blob {
+            public func get(keyPath : Text) : async ?Blob {
                 let fullKey = keyPath ;// # ":" # key;
                 await kv.get(fullKey);
             };

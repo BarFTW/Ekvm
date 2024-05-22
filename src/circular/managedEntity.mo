@@ -16,9 +16,12 @@ import BucketModule "../BucketModule";
 import BucketActor "../BucketActor";
 import Utils "../utils";
 import Array "mo:base/Array";
+import Buffer "mo:base/Buffer";
+
 import { JSON; Candid; CBOR } "mo:serde";
 // import whiteLables "whiteLabels";
 import Collection "../collectionsModule";
+
 
 module {
 
@@ -35,25 +38,20 @@ module {
 
     public type ManagedEntity = {
         ids: [Text];
-        wlId : Text;
-        id : Text;
-        name : Text;
         principals: [(Principal, Role)];
-        owner : Principal;
-        admins : [Principal];
     };
 
     public class EntityManager(kv : EkvmModule.EKVDB, typeName : Text, idNames: [Text], indexes: [[(IndexBy, Nat)]]) = {
         var cols = Collection.init(kv);
 
-        public func createEntity(entity : ManagedEntity, objBlob : Blob) : async () {
-            let principals = Array.append([entity.owner], entity.admins);
+        // public func createEntity(entity : ManagedEntity, objBlob : Blob) : async () {
+        //     let principals = Array.append([entity.owner], entity.admins);
 
-            let indexes : [Text] = Array.map<Principal, Text>(principals, func p = "wlId:" # entity.wlId # "-" # typeName # "Of:" # Principal.toText(p));
-            ignore await cols.add(entity.id, "wlId:" # entity.wlId# "-"#typeName, Array.append(["all-" # typeName, "wlId:" # entity.wlId # "-all-" #typeName], indexes), objBlob);
-        };
+        //     let indexes : [Text] = Array.map<Principal, Text>(principals, func p = "wlId:" # entity.wlId # "-" # typeName # "Of:" # Principal.toText(p));
+        //     ignore await cols.add(entity.id, "wlId:" # entity.wlId# "-"#typeName, Array.append(["all-" # typeName, "wlId:" # entity.wlId # "-all-" #typeName], indexes), objBlob);
+        // };
 
-        private func getDataKey(ids:[Text]): ?Text {
+        public func getDataKey(ids:[Text]): ?Text {
             if (ids.size() != idNames.size()) {
                 Debug.print("ERROR: Missing id part"); 
                 return null;
@@ -65,6 +63,41 @@ module {
             let dataKey = Array.foldLeft<Text, Text>(dataKeyParts, typeName, func (key, p) = key # "-" # p);
             Debug.print("DataKey: " # dataKey);
             ?dataKey;
+        };
+
+        public func getIdsFromKey(key: Text): [Text] {
+            let partsIter = Text.split(key, #char '-');
+            let parts = Iter.toArray<Text>(partsIter);
+            let s : Nat = Array.size(parts);
+
+            if (s != Array.size(idNames) + 1 or  s < 1) {
+                Debug.trap("wrong key structure " # debug_show(s));
+            };
+
+            let buffer = Buffer.Buffer<Text>(s-1);
+            
+            var i=0;
+            let b=Array.foldLeft<Text, Buffer.Buffer<Text>>(parts, buffer, func(buf, p) {
+            
+                let p2 = Iter.toArray(Text.split(p, #char ':'));
+                if (i==0) {
+                    if (p2[0] != typeName) {
+                        Debug.trap("wrong type, expected " # typeName # " but got " # p2[0] );
+                    };
+                } else if (Array.size(p2) == 2) {
+                    if (p2[0] != idNames[i-1]) {
+                        Debug.trap("wrong key part, expected "# idNames[i-1] # " but got " # p2[0]);
+                    };
+                    buf.add(p2[1]);
+                } else {
+                    Debug.trap("wrong key, missing :");
+                };
+                i := i+1;
+                buf;
+                
+            });
+
+            Buffer.toArray(buffer);
         };
 
         private func handleIndex(index:[(IndexBy, Nat)], ids:[Text], principals: [(Principal, Role)]) : [Text] {
@@ -114,7 +147,7 @@ module {
             indexKeys;
         };
 
-        public func createEntityNew(entity : ManagedEntity, objBlob : Blob) : async () {
+        public func createEntity(entity : ManagedEntity, objBlob : Blob) : async () {
             let { ids; principals } = entity;
             // if (ids.size() != idNames.size()) {
             //     Debug.print("ERROR: Missing id part"); 
@@ -164,7 +197,7 @@ module {
             Debug.print("All Indexes: "# debug_show(allIndexes));
             switch (dataKey) {
                 case (?dk) {
-                    ignore await cols.add(entity.id, dk, Array.flatten<Text>(allIndexes), objBlob);
+                    ignore await cols.add(dk, Array.flatten<Text>(allIndexes), objBlob);
                 };
                 case (_) {
                     Debug.print("no data Key");
@@ -218,19 +251,19 @@ module {
         };
 
 
-        public func _get(id: Text, wlId: Text): async ?Blob {
-            await cols.get("wlId:" #wlId # "-" # typeName, id);
-        };
+        // public func _get(id: Text, wlId: Text): async ?Blob {
+        //     await cols.get("wlId:" #wlId # "-" # typeName, id);
+        // };
 
         public func get(key: Text): async ?Blob {
-            await cols.getNew(key);
+            await cols.get(key);
         };
 
-        public func getNew(ids: [Text]): async ?Blob {
+        public func getByIds(ids: [Text]): async ?Blob {
             let dataKey : ?Text = getDataKey(ids);
             switch (dataKey) {
                 case (?key) {
-                    await cols.getNew(key);
+                    await cols.get(key);
                 };
                 case (_) {
                     return null;
