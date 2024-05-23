@@ -63,8 +63,7 @@ actor Circular{
     ]);
 
 
-    public type Campaign = {
-        entity :  EMModule.ManagedEntity;
+    public type Campaign =  EMModule.ManagedEntity and {
         name : Text;
         dateFrom: Text;
         dateTo: Text;
@@ -77,10 +76,9 @@ actor Circular{
         webHooks : ?[{ event : Text; url : Text }];
     };
 
-    public type Project = {
+    public type Project =  EMModule.ManagedEntity and ProjectData and {
         entity : EMModule.ManagedEntity;
         name : Text;
-        additionalData : ProjectData;
         token: ?Principal;
     };
 
@@ -99,9 +97,8 @@ actor Circular{
         parentDealsSetting: ?DealConcatenationSetting;
     };
 
-    public type WhiteLabel = {
+    public type WhiteLabel =  EMModule.ManagedEntity and {
         name : Text;
-        entity : EMModule.ManagedEntity;
         members : [Text];
         token: ?Principal;
     };
@@ -111,8 +108,7 @@ actor Circular{
     //     calculate: (Event, State: Blob) -> [Reward];
     // };
 
-    public type Offer = {
-        entity : EMModule.ManagedEntity;
+    public type Offer = EMModule.ManagedEntity and {
         calculatorActor: Principal;
         dealType: Text;
         config: Blob;
@@ -125,8 +121,8 @@ actor Circular{
         values: [T];
     };
 
-    public type Agent = {
-        entity: EMModule.ManagedEntity;
+    public type Agent =  EMModule.ManagedEntity and {
+
         name: Text;
         metadata: KVs<Text>;
         parent: Principal;
@@ -150,12 +146,12 @@ actor Circular{
 
     public func createProject(project : Project) : async ?Text {
         let projectBlob : Blob = to_candid (project);
-        await projects.createEntity(project.entity, projectBlob);
+        await projects.createEntity(project, projectBlob);
     };
 
     public func createCampaign(campaign: Campaign) : async ?Text {
         let campaignBlob : Blob = to_candid (campaign);
-        await campaigns.createEntity(campaign.entity, campaignBlob);
+        await campaigns.createEntity(campaign, campaignBlob);
     };
 
     public func getCampaign(ids:[Text]): async ?Campaign {
@@ -211,7 +207,7 @@ actor Circular{
 
     public func createWhiteLabel(wl : WhiteLabel) : async ?Text {
         let wlBlob = to_candid (wl);
-        await whiteLabels.createEntity(wl.entity, wlBlob);
+        await whiteLabels.createEntity(wl, wlBlob);
     };
 
     public func getWhiteLabelIdsFor(principal : ?Principal) : async ?[Text] {
@@ -247,7 +243,7 @@ actor Circular{
                 let newOffer = { offer with config = blob };
                 Debug.print("new Offer " # debug_show(newOffer));
                 let b = to_candid(newOffer);
-                ignore await offers.createEntity(offer.entity, b);
+                ignore await offers.createEntity(offer, b);
                 Debug.print("After creating offer, b: "#debug_show(b));
 
             };
@@ -303,7 +299,7 @@ actor Circular{
     public shared (msg) func createAgent(agent: Agent): async ?Text {
         let owner = msg.caller;
         Debug.print("Caller "# Principal.toText(owner));
-        let newPrincipals = Array.append(agent.entity.principals,[(
+        let newPrincipals = Array.append(agent.principals,[(
             owner,
             #Owner
         )]);
@@ -315,7 +311,7 @@ actor Circular{
             Debug.print("principal " # Principal.toText(p));
         };
         let b : Blob = to_candid (newAgent);
-        await agents.createEntity(agent.entity, b);
+        await agents.createEntity(agent, b);
     };
 
     public func getAgentsKeysByWL(wl: Text): async ?[Text] {
