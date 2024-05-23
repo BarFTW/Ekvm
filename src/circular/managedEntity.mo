@@ -147,7 +147,7 @@ module {
             indexKeys;
         };
 
-        public func createEntity(entity : ManagedEntity, objBlob : Blob) : async () {
+        public func createEntity(entity : ManagedEntity, objBlob : Blob) : async ?Text {
             let { ids; principals } = entity;
             // if (ids.size() != idNames.size()) {
             //     Debug.print("ERROR: Missing id part"); 
@@ -160,12 +160,12 @@ module {
             // let dataKey = Array.foldLeft<Text, Text>(dataKeyParts, typeName, func (key, p) = key # "-" # p);
             // Debug.print("DataKey: " # dataKey);
             let dataKey = getDataKey(ids);
-            switch (dataKey) {
-                case (?key) {};
-                case (_) {
-                    return;
-                };
-            };
+            // switch (dataKey) {
+            //     case (?key) {};
+            //     case (_) {
+            //         return;
+            //     };
+            // };
 
 
             func _handleIndex(index:[(IndexBy, Nat)]) : [Text] {
@@ -203,6 +203,7 @@ module {
                     Debug.print("no data Key");
                 };
             };
+            dataKey;
             
             // let principals = Array.append([entity.owner], entity.admins);
 

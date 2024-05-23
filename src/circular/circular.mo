@@ -56,6 +56,13 @@ actor Circular{
         [(#IdPart,0)] //all campaigns by wl
     ]);
 
+    var agents = EMModule.EntityManager(kv, "agents",["wl", "id"],[
+        [(#Principal,0),(#IdPart,0)], //all agents by wl and principal
+        [(#Principal,0)], // all agents by principal 
+        [(#IdPart,0)] //all agents by wl
+    ]);
+
+
     public type Campaign = {
         entity :  EMModule.ManagedEntity;
         name : Text;
@@ -74,23 +81,31 @@ actor Circular{
         entity : EMModule.ManagedEntity;
         name : Text;
         additionalData : ProjectData;
+        token: ?Principal;
+    };
+
+    type DealConcatenationSetting = {
+        #Simple: (Float, Nat);
+        #Explicit: [(Float, Nat)];
+    };
+
+    public type WLSettings = {
+        token: ?Principal;
+        dynamicSettings: KVs<Text>;
+        mingingEvents: [Text];
+        platformFee: (Float, Nat);
+        wlFee: (Float, Nat);
+        dealConcatSetting: ?DealConcatenationSetting; 
+        parentDealsSetting: ?DealConcatenationSetting;
     };
 
     public type WhiteLabel = {
         name : Text;
         entity : EMModule.ManagedEntity;
         members : [Text];
+        token: ?Principal;
     };
 
-    public type Reward = {
-        amount: Nat;
-    };
-
-    public type Event = {
-        name: Text;
-        amount: Nat;
-        count: Nat;
-    };
 
     // public type DealCalculator = {
     //     calculate: (Event, State: Blob) -> [Reward];
@@ -101,6 +116,21 @@ actor Circular{
         calculatorActor: Principal;
         dealType: Text;
         config: Blob;
+        fundSource: ?Principal;
+        shouldMint: Bool;
+    };
+
+    type KVs<T> = {
+        key: Text;
+        values: [T];
+    };
+
+    public type Agent = {
+        entity: EMModule.ManagedEntity;
+        name: Text;
+        metadata: KVs<Text>;
+        parent: Principal;
+        parentDealSetting: ?DealConcatenationSetting;
     };
 
     public func useState() {
@@ -118,12 +148,12 @@ actor Circular{
         campaigns.getIdsFromKey(key);
     };
 
-    public func createProject(project : Project) : async () {
+    public func createProject(project : Project) : async ?Text {
         let projectBlob : Blob = to_candid (project);
         await projects.createEntity(project.entity, projectBlob);
     };
 
-    public func createCampaign(campaign: Campaign) : async () {
+    public func createCampaign(campaign: Campaign) : async ?Text {
         let campaignBlob : Blob = to_candid (campaign);
         await campaigns.createEntity(campaign.entity, campaignBlob);
     };
@@ -179,7 +209,7 @@ actor Circular{
         };
     };
 
-    public func createWhiteLabel(wl : WhiteLabel) : async () {
+    public func createWhiteLabel(wl : WhiteLabel) : async ?Text {
         let wlBlob = to_candid (wl);
         await whiteLabels.createEntity(wl.entity, wlBlob);
     };
@@ -270,6 +300,38 @@ actor Circular{
 
     };
 
+    public shared (msg) func createAgent(agent: Agent): async ?Text {
+        let owner = msg.caller;
+        Debug.print("Caller "# Principal.toText(owner));
+        let newPrincipals = Array.append(agent.entity.principals,[(
+            owner,
+            #Owner
+        )]);
+        Debug.print("principals size: " # debug_show(Array.size(newPrincipals)));
+        let newAgent = { agent with principals = newPrincipals };
+        // Debug.show("new agent "# debug_show(newPrincipals));
+        Debug.print("new agent principals size: " # debug_show(Array.size(newAgent.principals)));
+        for ((p,_) in newAgent.principals.vals()) {
+            Debug.print("principal " # Principal.toText(p));
+        };
+        let b : Blob = to_candid (newAgent);
+        await agents.createEntity(agent.entity, b);
+    };
+
+    public func getAgentsKeysByWL(wl: Text): async ?[Text] {
+        await agents.getEntityKeysByIndex(null, [wl], [(#IdPart,0)]);
+    };
+
+    public func getAgent(key: Text): async ?Agent {
+        let bOpt = await agents.get(key);
+        switch (bOpt) {
+            case (?b) {
+                from_candid b;
+            };
+            case (_) null;
+        };
+    };
+
     public func onEvent(event: DealTypes.Event, dealKey: Text): async [DealTypes.Reward] {
         let tupOpt = await fetchOffer(dealKey);
         switch (tupOpt) {
@@ -298,14 +360,14 @@ actor Circular{
         }
     };
 
-    public query func greet(greek: Bool): async Text  {
+    public shared (msg) func greet(greek: Bool): async Text  {
         var g: Simple.Greeter = Simple.A("");
         if (greek) {
             g:= Simple.B("Yanis");
         } else {
             g:=Simple.A("Johnny");
         };
-        g.sayHello();
+        g.sayHello() # Principal.toText(msg.caller);
     };
 
 };
