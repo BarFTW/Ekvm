@@ -1,3 +1,11 @@
+[package]
+name = "ekvm"
+version = "0.1.0"
+description = "Infinitly scaleable Elastic Key-Value Store library"
+repository = "https://github.com/BarFTW/Ekvm"
+keywords = [ "database", "scalable", "map", "storage" ]
+license = "Apache-2.0"
+
 [dependencies]
 base = "0.11.1"
 stableheapbtreemap = "1.5.0"
