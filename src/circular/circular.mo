@@ -23,10 +23,11 @@ import Collection "../collectionsModule";
 import EMModule "managedEntity";
 import Simple "deals/simple";
 import DealTypes "deals/types";
+import DealFactory "deals/factory";
 import { JSON;  } "mo:serde";
 // import { DealCalculator; Reward} "deals/types";
 
-actor {
+actor Circular{
 
     stable var db : ?EkvmModule.Ekvm = null;
 
@@ -98,6 +99,7 @@ actor {
     public type Offer = {
         entity : EMModule.ManagedEntity;
         calculatorActor: Principal;
+        dealType: Text;
         config: Blob;
     };
 
@@ -273,20 +275,26 @@ actor {
         switch (tupOpt) {
             case (?(offer, config, _)) {
                 Debug.print("offer "#debug_show(offer));
-                let configO: ?Simple.SimpleRevShareConfig = from_candid(offer.config);
-                switch (configO) {
-                    case (?config) {
-                        let calc = Simple.SimpleRevShareDeal(config);
+                let myPrincipal = Principal.fromActor(Circular);
+                let calcOpt = DealFactory.getCalculator(myPrincipal, "simpleRevShare", myPrincipal, offer.config);
+                Debug.print("after getCalculator: ");
+
+                switch (calcOpt) {
+                    case (?calc) {
                         Debug.print("after creating calc");
                         let state  = DealTypes.DummyState();
                         await calc.calculate(event, state);
                     };
                     case (_) {
+                        Debug.trap("oh no, no deal calculator");
                         [];
                     };
                 }
             };
-            case (_) [];
+            case (_) {
+                Debug.print("no offer found");
+                []
+            };
         }
     };
 

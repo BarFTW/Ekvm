@@ -30,6 +30,7 @@ module {
             2;
         };
     };
+    
     public type DealCalculator = {
         calculate: (event: Event, State: State) -> async [Reward];
     };
