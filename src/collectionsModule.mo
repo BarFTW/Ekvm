@@ -11,7 +11,7 @@ module {
     public type Collection = {
         add : (dataPath : Text, indexes : [Text], value : Blob) -> async Bool;
         // get : (keyPath : Text, key : Text) -> async ?Blob;
-        get : (keyPath : Text) -> async ?Blob;
+        get : (keyPath : ?Text) -> async ?Blob;
         getKeys : (keyPath : Text) -> async ?[Text];
     };
 
@@ -57,9 +57,16 @@ module {
             //     await kv.get(fullKey);
             // };
 
-            public func get(keyPath : Text) : async ?Blob {
-                let fullKey = keyPath ;// # ":" # key;
-                await kv.get(fullKey);
+            public func get(keyPath : ?Text) : async ?Blob {
+                switch (keyPath) {
+                    case (?key) {
+                        let fullKey = key;
+                        await kv.get(fullKey);
+                    };
+                    case null {
+                        null;
+                    };
+                };
             };
 
             public func getKeys(keyPath : Text) : async ?TextArray {

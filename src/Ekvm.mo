@@ -39,6 +39,11 @@ module {
         put: (key:Text, value: Blob, forceNewExternal: Bool) -> async Bool;
     };
 
+    public type DB2 = EKVDB and {
+        del: (key:Text) -> async Bool;
+    };
+
+
 // should be private
     public func _whoManages(ekvm: Ekvm, key: Text) : ?Principal {
         let id = Utils.key2Id(key, ekvm.numBuckets);

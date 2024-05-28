@@ -2,11 +2,7 @@
   "canisters": {
     "db_test": {
       "type": "motoko",
-      "main": "src/test.mo"
-    },
-    "circular": {
-      "type": "motoko",
-      "main": "src/circular/circular.mo"
+      "main": "test/index.test.mo"
     }
   },
   "defaults": {
