@@ -21,6 +21,7 @@ Facts marked **[unverified]** were not confirmed in official docs while this was
 | D7 | Benchmark uses YCSB-standard ~1 KB records: 100 M records, 3 secondary indexes, on **~50+ shards** (planned: 64) across multiple subnets (§5.7, §12). Supersedes D6's 16-shard benchmark scale | 2026-11-13 |
 | D8 | No mainnet runs for now: all benchmarks run on PocketIC. The mainnet cost estimates in §5.7 are kept as reference only | 2026-11-13 |
 | D9 | 32-shard ladder target confirmed: global top-100 page p50 < 600 ms, p95 < 1.2 s | 2026-11-13 |
+| D10 | Scalable routing: range-compressed, versioned shard map cached by clients (lazy refresh, optional delta fetch); variable slot count (`slotBits`) over a 32-bit key hash, with zero-movement slot doubling; `slotBits` carried in every request and cursor; hot single partition keys handled by data modeling (salting) (§4.1, §4.2, §4.5) | 2026-11-13 |
 
 ---
 
@@ -136,20 +137,21 @@ type Entry   = { key : Key; value : Blob; version : Nat64 };
 type Cond    = { #any; #absent; #version : Nat64 };          // CAS
 type WriteOp = { #put : { key : Key; value : Blob; cond : Cond }
                ; #delete : { key : Key; cond : Cond } };
-type Err     = { #wrongShard : { epoch : Nat64 }              // client must refresh map
+type Route   = { epoch : Nat64; slotBits : Nat8 };            // map version + slot count the client routed with
+type Err     = { #wrongShard : { epoch : Nat64; slotBits : Nat8 } // client must refresh map
                ; #conflict : { key : Key; current : ?Nat64 }
                ; #unauthorized; #tooLarge; #migrating; #unknownIndex };
 type Bound   = { #incl : Blob; #excl : Blob; #unbounded };
 type IxRow   = { ixKey : Blob; key : Key; version : Nat64; value : ?Blob };
 
 // updates
-write   : (req : { epoch : Nat64; requestId : Blob; ops : [WriteOp] })
+write   : (req : { route : Route; requestId : Blob; ops : [WriteOp] })
             -> async Result<[Nat64], Err>;   // all-or-nothing within one shard, incl. local indexes
 // queries
-get     : query ({ epoch : Nat64; keys : [Key] }) -> async Result<[?Entry], Err>;
-scan    : query ({ epoch : Nat64; pk : Blob; from : Bound; to : Bound;
+get     : query ({ route : Route; keys : [Key] }) -> async Result<[?Entry], Err>;
+scan    : query ({ route : Route; pk : Blob; from : Bound; to : Bound;
                    limit : Nat; reverse : Bool }) -> async Result<{ entries : [Entry]; next : ?Blob }, Err>;
-ixScan  : query ({ epoch : Nat64; index : Nat16; from : Bound; to : Bound; after : ?Blob;
+ixScan  : query ({ route : Route; index : Nat16; from : Bound; to : Bound; after : ?Blob;
                    limit : Nat; reverse : Bool; withValues : Bool })
             -> async Result<{ rows : [IxRow]; more : Bool }, Err>;   // this shard's slice, in order
 ```
@@ -171,9 +173,17 @@ topN(index, n, { reverse }) = query(index, unbounded, { limit: n, ... })
 ### Index-canister API
 
 ```motoko
-shardMap   : query () -> async { epoch : Nat64; slots : [(Nat16, Nat16, Principal)]; schemaVersion : Nat };
+type ShardMap = {
+  epoch : Nat64;                 // map version
+  slotBits : Nat8;               // slot count = 2^slotBits (1..32)
+  shards : [Principal];          // shard table, referenced by index
+  ranges : [(Nat32, Nat16)];     // (first slot of range, shard index), sorted; a range ends where the next starts
+  schemaVersion : Nat;
+};
+shardMap      : query () -> async ShardMap;
+shardMapSince : query (epoch : Nat64) -> async { #delta : { to : ShardMap; changed : [(Nat32, Nat16)] }; #full : ShardMap };
 // admin, controllers only:
-addWriter / removeWriter / setReaders;  addShard(subnet : ?Principal);  moveSlots(range, to);
+addWriter / removeWriter / setReaders;  addShard(subnet : ?Principal);  moveSlots(range, to);  doubleSlots();
 uploadShardWasm(chunk) / commitShardWasm(sha256);  upgradeShards(plan);  backfillIndex(id);  status()
 ```
 
@@ -184,11 +194,11 @@ uploadShardWasm(chunk) / commitShardWasm(sha256);  upgradeShards(plan);  backfil
 ```mermaid
 flowchart LR
   subgraph Client["Client (TS lib / Motoko lib)"]
-    C[cached shard map<br/>epoch N<br/>k-way merge]
+    C[cached shard map<br/>epoch N · slotBits b<br/>k-way merge]
   end
   subgraph SubnetA["Subnet A"]
     I[Index canister<br/>slot map · wasm · cycles · admin]
-    S1[Shard 1<br/>slots 0..21844<br/>primary + local indexes]
+    S1[Shard 1<br/>slots 0..21844 (b=16)<br/>primary + local indexes]
     S2[Shard 2<br/>slots 21845..43689]
   end
   subgraph SubnetB["Subnet B"]
@@ -203,20 +213,47 @@ flowchart LR
   I -.-> S3
 ```
 
-### 4.1 Partitioning: fixed hash slots, not a ring
+### 4.1 Partitioning: hash slots with a variable slot count
 
-- `slot = hash(pk) mod 65536`, using SHA-256 truncated to 16 bits so the hash is stable across languages.
-- The slot map assigns contiguous slot ranges to shards. This is the Redis Cluster model.
-- **Why slots and not a consistent-hash ring:** moving one slot range is an explicit, bounded unit of migration. The map is small (ranges, typically under 1 KB). Ownership is easy to verify on the shard side.
+- **Key hash:** `h = first 4 bytes of SHA-256(pk)`, read as a big-endian `Nat32`. This is stable across languages, with shared test vectors.
+- **Slot:** `slot = h >> (32 − slotBits)`, i.e. the top `slotBits` bits of h.
+  - `slotBits` is a **field of the shard map, not a constant**. The default at creation is 16 (65,536 slots), and the theoretical ceiling is 32 (2³² slots).
+- The map assigns contiguous slot ranges to shards. This is the Redis Cluster model, generalised to a variable slot count.
+- **Why slots and not a consistent-hash ring:** moving one slot range is an explicit, bounded unit of migration. The map stays small because it is range-compressed (§4.2). Ownership is easy to verify on the shard side.
 - **Why hash for the primary key:** it spreads load evenly regardless of how keys are distributed. Orders other than "within one `pk`" are served by secondary indexes (§5).
-- **Hot partition caveat:** a single `pk` can't be split. If one partition could exceed one shard's write rate, the application has to spread it itself, e.g. `pk = id # bucket`.
 
-### 4.2 Client-side routing
+**Slot doubling (`doubleSlots`):**
+- `slotBits` becomes `slotBits + 1`, and every slot s becomes the two slots 2s and 2s + 1. Both children are owned by the same shard as s.
+- A range `[a, b]` becomes `[2a, 2b + 1]`, so the number of ranges, and therefore the map size, is unchanged.
+- **Zero data movement:** no key changes shard, because a key's new slot is just its old slot plus one more hash bit. The cost is one map version bump plus an O(R) rewrite of the ranges on the index and on each shard (R = number of ranges).
+- **Rollout without downtime:**
+  1. The index pushes the new `slotBits` to every shard. While the rollout runs, shards accept requests routed with either the old or the new `slotBits`; ownership is identical, and each shard checks it by recomputing the slot from the `pk` with its own `slotBits`.
+  2. When every shard has confirmed, the index publishes the new map (`epoch + 1`).
+  3. From then on, shards answer `#wrongShard` to requests routed with the old `slotBits`.
+- **Purpose: splitting an oversized slot.**
+  - If one slot is too large or too hot for one shard, double, repeating if needed, until its keys fall into two or more child slots. Then move one child with the normal protocol (§4.3).
+  - The limit is a single `pk`: all of its entries hash to one value, so no amount of doubling splits it. That case is a data-modeling issue (§4.5).
+- Slot halving (merging 2s and 2s + 1 back) is not planned for v1. It would only be possible where both children share an owner.
 
-- The client fetches `shardMap` once with a query and caches it with its `epoch`. It then calls shards directly.
-- Every request carries the client's `epoch`.
-- Each shard holds its own copy of the ranges it owns, pushed by the index. It answers `#wrongShard { epoch }` when it doesn't own the slot. The client then refreshes the map and retries once.
-- The index is never on the hot path. If the index is down, data traffic continues.
+### 4.2 Client-side routing and map caching
+
+- **Map format.** The client fetches `shardMap` with a query and caches it. The map is versioned by `epoch` and range-compressed: a shard table plus `(firstSlot, shardIndex)` per contiguous range.
+  - Its size is proportional to the number of ranges R, not the number of slots. With 64 shards and a few ranges each, it is a few KB.
+- **Worst case at `slotBits = 16`:** every slot is its own range, so R = 65,536.
+  - That is ~0.4–0.7 MB with the compact encoding, or ~2 MB if principals were inlined per range.
+  - Either way it is under the **3 MiB** query response limit ([limits]). It is also under 2 MiB if fetched through a replicated call.
+- **Larger `slotBits`:** R is bounded by how many moves have happened, not by 2^slotBits. The index enforces a cap on R (default 100,000 ranges, ~1 MB compact) and refuses moves that would exceed it. **[proposed default]**
+- **Lookup:** compute the slot from the 32-bit hash, then binary-search the ranges: O(log R).
+- **Refresh.** Refresh is lazy: it happens only when a shard answers `#wrongShard { epoch, slotBits }`. The client then calls `shardMapSince(cachedEpoch)`:
+  - The index keeps the last 256 map changes, so a recent client gets only the changed ranges (`#delta`).
+  - An older client gets the full map (`#full`).
+  - The client then retries once.
+- **Every request carries `route = { epoch; slotBits }`.** A shard answers `#wrongShard` if:
+  - it doesn't own the key's slot, recomputed from the `pk` with the shard's own `slotBits`; or
+  - the request's `slotBits` is neither its current value nor, during a doubling rollout, the previous one.
+
+  Because the shard recomputes the slot itself, a client with an old map gets `#wrongShard` rather than being misrouted, even after a doubling.
+- The index is never on the hot path. If the index is down, data traffic continues on cached maps.
 - Composite queries are **same-subnet and ingress-only** ([Canisters][canisters]). They therefore can't be the general fan-out mechanism. Cross-shard reads are fanned out by the client in parallel (§5.4).
 
 ### 4.3 Split / move protocol
@@ -224,12 +261,14 @@ flowchart LR
 The index runs the protocol. Each step is persisted before every `await`, so a crash or trap resumes from a timer.
 
 1. **Trigger.** A shard exceeds a configured write rate or memory threshold (default: heap > 2 GiB), or the operator calls `moveSlots`. The index creates the target shard if needed.
+   - The index picks R from per-slot size and write-rate stats that each shard reports.
+   - If the shard's load sits in one slot, the index first runs `doubleSlots` (§4.1), repeating until that slot is split, then moves one of the children.
 2. **Copy.** The source shard marks range R as `migrating → T` and starts a per-range change log. The index pulls snapshot pages from the source and pushes them to T with batched `write` calls. During this phase the source still serves reads and writes for R. T rebuilds local index entries as it ingests, using the same `extract`.
 3. **Catch-up.** The index replays the change log to T, repeating until the log is small.
 4. **Cutover.** The source freezes writes on R (writes get `#migrating` and the client retries with backoff). The index drains the final log, then:
    - T becomes owner of R.
    - The source drops ownership of R.
-   - The index bumps `epoch`.
+   - The index bumps `epoch`. `slotBits` is unchanged; only a doubling changes it.
 
    The freeze lasts roughly 2–3 update rounds.
 5. **Cleanup.** The source deletes R's data and its local index entries in background batches, using a timer and staying within the instruction budget.
@@ -246,6 +285,21 @@ During a move, a global scan may see R on both shards. The source keeps serving 
 4. When every shard reports done, the index flips the index to `#ready`. Until then, `query` on the index returns `#unknownIndex`, or `#building` with an explicit opt-in.
 
 Dropping an index is the same process run in reverse.
+
+### 4.5 Hot or oversized partition keys (data modeling)
+
+All entries of one `pk` live in one slot, so on one shard. Routing can't split them (§4.1), so a `pk` that is too hot or too large for one shard has to be fixed in the data model. The library documents the following patterns and ships helpers for them:
+
+| Pattern | Key shape | Writes | Reads of the whole logical partition |
+|---|---|---|---|
+| **Deterministic salting** | `pk = base ‖ (hash(sk) mod B)` | Spread over B slots | Point read: 1 shard (salt recomputed from `sk`). Partition scan: B-way fan-out, merged by `sk` like a global page |
+| **Random suffix** (write-heavy, append-only) | `pk = base ‖ random(0..B−1)` | Spread over B slots | Point read and scan both need B-way fan-out |
+| **Time bucketing** (time series) | `pk = base ‖ timeBucket(ts)` | The current bucket is hot. Combine with salting if one bucket is too hot | A time range touches only the matching buckets |
+
+- **Choosing B:** about (expected peak write rate of the partition ÷ the per-shard write budget measured in M3) × 2.
+- Changing B later means rewriting the partition, so pick it up front.
+- Secondary indexes are unaffected. Index keys include the full `pk`, and global scans already fan out (§5).
+- **Detection:** shards report their top slots and top `pk`s by bytes and writes (sampled) in `status()`, so a hot partition shows up in monitoring before it causes trouble.
 
 ---
 
@@ -321,11 +375,12 @@ type Cursor = {
   index : Nat16; schemaVersion : Nat;
   from : Bound; to : Bound; reverse : Bool;
   after : Blob;             // last returned ixKey ‖ pk ‖ sk
-  epoch : Nat64;            // hint only; a stale epoch just refreshes the map
+  epoch : Nat64;            // map version the page was routed with
+  slotBits : Nat8;          // slot count the page was routed with
 };
 ```
 
-The cursor is **stateless**: no server-side session. It survives shard splits and moves, because it names a position in key space, not a shard. It is also valid unchanged against a future GSI tier.
+Resuming a cursor with a stale `epoch`/`slotBits` gets `#wrongShard` from the shards, so the client refreshes the map and resends the same `after`; nothing is misrouted. `after` is a position in key space, not a slot number, so the page result does not depend on `slotBits`. The cursor is **stateless**: no server-side session. It survives shard splits and moves, because it names a position in key space, not a shard. It is also valid unchanged against a future GSI tier.
 
 ### 5.4 Fan-out on the IC
 
@@ -417,17 +472,19 @@ PocketIC and local replicas give instruction and message counts, not real networ
 
 ### 5.8 Computational complexity
 
-Notation: n = records per shard, S = shards, k = results requested (page size), i = secondary indexes, m = records in a moved slot range (m ≤ n). All structures are `mo:core/Map` B-trees (order 32), so each lookup, insert or delete costs O(log n). The primary map has n entries; each index map has at most n entries.
+Notation: n = records per shard, S = shards, R = ranges in the shard map (R ≥ S; typically a small multiple of S), k = results requested (page size), i = secondary indexes, m = records in a moved slot range (m ≤ n). All structures are `mo:core/Map` B-trees (order 32), so each lookup, insert or delete costs O(log n). The primary map has n entries; each index map has at most n entries.
 
 | Operation | Per shard | Client / overall | Notes |
 |---|---|---|---|
-| Point read | O(log n) | Routing: O(1) slot hash + O(log S) binary search over cached slot ranges | 1 query, 1 shard |
+| Point read | O(log n) | Routing: O(1) slot hash + O(log R) binary search over cached ranges | 1 query, 1 shard |
+| Map fetch / refresh | — | O(R) full, O(changed ranges) delta | Lazy, on `#wrongShard` only |
+| Slot doubling | O(R) range rewrite, **no data movement** | O(R) on the index | One map version bump |
 | Range scan within a partition | O(log n + k) | — | 1 shard, because a `pk` lives on one shard |
 | Global ordered page (scatter-gather) | O(log n + k) on **every** shard, in parallel | Merge O(k log S), plus O(S·k) to receive and decode | Fetches up to **S·k rows to return k** (S-fold overfetch) |
 | Global page, adaptive mode | O(log n + ⌈c·k/S⌉) per shard per round | ~c·k rows fetched, occasionally a 2nd round | §5.3 |
 | Write with i indexes | O((1 + 2i) log n) = O((1 + i) log n) | — | One message, **no inter-canister calls**. Overwrites delete the old index key and insert the new one (hence the 2i). Dedupe-table lookup adds O(log d) for d remembered request ids |
 | Delete with i indexes | O((1 + i) log n) | — | Same message |
-| Shard split / move | O(m) to copy, O(m (1 + i) log n′) to rebuild at the target | — | Incremental: background batches on a timer, each under the 40 B update instruction limit. Never one big message |
+| Shard split / move (after doubling, if one slot was too large) | O(m) to copy, O(m (1 + i) log n′) to rebuild at the target | — | Incremental: background batches on a timer, each under the 40 B update instruction limit. Never one big message |
 | Index backfill (new index) | O(n log n) per shard | All shards in parallel | Incremental batches, like a split |
 
 **Corrections to the shorthand:**
@@ -538,16 +595,17 @@ On the fiduciary subnet, multiply by ×2.6. Use the `ic0.cost_*` APIs instead of
   - Steps are written idempotently, e.g. `assignSlots(epoch)` is a no-op if already applied.
   - State changes made before an `await` are not rolled back when the call is rejected, so state is committed before each `await` and re-checked after it.
   - Calls to our own shards use unbounded wait. Anything external, such as the CMC, uses bounded wait (`with timeout`) and treats `#system_unknown` as "check, then retry" ([Inter-canister calls][icc]).
-- **Stale client map:** `#wrongShard` triggers a refresh and one retry. Correctness never depends on clients' maps being fresh, because shards are the authority. For global scans, the client re-fetches only the affected slice, using the same `after` cursor.
+- **Stale client map:** `#wrongShard` triggers a refresh (delta if possible) and one retry. This also covers a map from before a slot doubling. Correctness never depends on clients' maps being fresh, because shards are the authority. For global scans, the client re-fetches only the affected slice, using the same `after` cursor.
 - **Shard out of cycles or frozen:** its slots become unavailable, and the error surfaces to clients. Global scans fail loudly instead of skipping that shard. The top-up margin (7 days of burn) and alerts are the mitigation. Data is not lost.
-- **Index lost:** data traffic continues. A new index can rebuild the slot map from the shards, since each reports its own ranges and epoch.
+- **Index lost:** data traffic continues. A new index can rebuild the slot map from the shards, since each reports its own ranges, `slotBits` and epoch.
 
 ---
 
 ## 11. Testing (local only, no mainnet)
 
 - **Unit tests:** `mops test` covering:
-  - the slot hash;
+  - the 32-bit slot hash and `slotBits` slot derivation (vectors shared with TS);
+  - range compression and doubling of the map (`[a, b] → [2a, 2b + 1]`);
   - the order-preserving encoders (vectors shared with the TS client);
   - the Store and local index maintenance (overwrite and delete leave no stale entries);
   - CAS/dedupe;
@@ -557,7 +615,10 @@ On the fiduciary subnet, multiply by ×2.6. Use the `ic0.cost_*` APIs instead of
   - put/get/delete/scan;
   - global `query`/`topN` equal to a sorted reference;
   - pagination across a split;
-  - stale epoch → `#wrongShard`;
+  - stale epoch or stale `slotBits` → `#wrongShard`, never misrouting;
+  - slot doubling under concurrent writes: zero data moved, no failed requests during rollout;
+  - oversized-slot split (double, then move a child);
+  - map delta fetch vs full fetch;
   - a split under concurrent writes, checked for no lost or duplicated writes or index rows;
   - index backfill;
   - upgrade with EOP keep, plus snapshot rollback;
@@ -607,11 +668,11 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 
 | # | Deliverable | Done when |
 |---|---|---|
-| M0 | Repo skeleton (mops, moc pinned, PocketIC pinned). Slot hash and order-preserving encoders with cross-language vectors | `mops test` green |
+| M0 | Repo skeleton (mops, moc pinned, PocketIC pinned). 32-bit slot hash with `slotBits`, and order-preserving encoders with cross-language vectors | `mops test` green |
 | M1 | Single shard: Store on `core/Map`, write/get/scan/delete, CAS, dedupe, access control, **`Schema` and local indexes and `ixScan`** | Unit and replica tests green |
-| M2 | Index canister plus static multi-shard: shard map query, epoch checks, TS client routing, **global `query`/`topN` via k-way merge and cursor** | Multi-shard tests: global scan equals reference |
+| M2 | Index canister plus static multi-shard: range-compressed shard map, delta fetch, `route` checks, TS client routing, **global `query`/`topN` via k-way merge and cursor** | Multi-shard tests: global scan equals reference |
 | M3 | Cycles: create, top-up, status/metrics. **Benchmark harness, YCSB A–E and IX-1…3, synthetic data generator** | Baseline numbers recorded in `docs/BENCH.md` |
-| M4 | Split/move protocol with crash-resume (local index entries move with their rows). **Index backfill/drop jobs** | Split-under-load test and scan-across-split test green |
+| M4 | Split/move protocol with crash-resume (local index entries move with their rows), **slot doubling and oversized-slot split**, salting helpers (§4.5). **Index backfill/drop jobs** | Split-under-load test and scan-across-split test green |
 | M5 | Wasm store and rolling upgrade with snapshots, multi-subnet placement (PocketIC), **optional per-subnet composite-query gather** | Upgrade/rollback tests green, IX-1 re-run multi-subnet |
 | M6 | README, examples, demo (incl. the ad-auction example), v0.1.0 tag (local only, not published). **GSI decision gate:** go if the 64-shard global top-100 page p95 (the D7 benchmark scale) exceeds 1.5 s (D6), if the 16→32→64 ladder slope rules out larger deployments, or if the instruction-based targets fail | Review with the user |
 | M7 | *(conditional on M6)* GSI tier: range-partitioned index shards, outbox propagation, lag metric, fallback to scatter-gather | Lag-bounded consistency tests green |
