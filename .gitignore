@@ -1,0 +1,4 @@
+.mops/
+build/
+ts/node_modules/
+*.log
