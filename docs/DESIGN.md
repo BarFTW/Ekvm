@@ -1,10 +1,20 @@
 # Ekvm v2: Design
 
-Status: draft for review · 2026-11-13 · License: Apache-2.0 (same as v1)
+Status: draft for review · rev 2 · 2026-11-13 · License: Apache-2.0 (same as v1)
 
-Ekvm ("Elastic Key-Value Map") is a Motoko library for running a key-value store across many canisters on the Internet Computer. This document covers a rewrite. The v1 code (`BarFTW/Ekvm`, 2024) is a reference for the idea only. No v1 code is reused.
+Ekvm ("Elastic Key-Value Map") is a **general-purpose** Motoko database library for the Internet Computer: a key-value store spread across many canisters, with user-defined secondary indexes and global ordered scans. This document covers a rewrite. The v1 code (`BarFTW/Ekvm`, 2024) is a reference for the idea only. No v1 code is reused.
 
-Facts marked **[unverified]** were not confirmed in official docs while this was written. They must be checked before we depend on them.
+Facts marked **[unverified]** were not confirmed in official docs while this was written. They must be checked before we depend on them. Numbers marked **[target]** are design hypotheses to be measured, not measurements.
+
+---
+
+## 0. Decisions log
+
+| # | Decision | Date |
+|---|---|---|
+| D1 | Global ordered scans across all shards are a requirement, over **user-defined secondary indexes** (any field or composite). Approach: §5 | 2026-11-13 |
+| D2 | Uncertified (single-replica) query reads are acceptable. A certified read path is **out of v1 scope** (§10) | 2026-11-13 |
+| D3 | Ekvm v2 is a generic library, not tied to any application. Validated by a synthetic benchmark suite (YCSB-like mixes, range and index scans), with ad auctions as at most one example workload (§12) | 2026-11-13 |
 
 ---
 
@@ -20,16 +30,16 @@ v1 was built because a single canister couldn't hold a meaningful database. That
 | Update execution threads | 1 per canister, 4 per subnet | [Resource limits][limits] |
 | Query execution threads | 2 per canister, 4 per replica node | [Resource limits][limits] |
 | Instructions | 40 B per update, 5 B per query | [Resource limits][limits] |
-| Payload | 2 MiB ingress, 2 MiB cross-subnet, 10 MiB same-subnet request | [Resource limits][limits] |
+| Payload | 2 MiB ingress, 2 MiB cross-subnet, 10 MiB same-subnet request; 3 MiB query response | [Resource limits][limits] |
 | Block rate | 1–3 blocks/s, up to 1,000 messages per block | [Resource limits][limits] |
 | Latency | update ~1–2 s, query ~200 ms | [Canisters][canisters], [Inter-canister calls][icc] |
 
 Motoko now uses **enhanced orthogonal persistence (EOP)** by default (since moc 0.15.0). A `persistent actor` keeps its 64-bit heap across upgrades without serializing it, and upgrade time no longer grows with heap size ([EOP][eop], [overview][op]).
 
-**The real problem is throughput, not size.** The target workload is an advertiser/publisher bidding system: millions of ads, hundreds of thousands of campaigns, and lookups at internet speed. At a few KB per ad that is single-digit GB, which fits one canister. What doesn't fit one canister:
+**The real problem is throughput, not size.** One canister can hold many GB, but:
 
 - **Writes.** A canister executes one update at a time, and a subnet has only 4 update threads. Write throughput therefore scales only by spreading shards over **multiple subnets**.
-- **Reads.** Queries are cheap and parallel, but each canister gets at most 2 query threads per node, so the hot read set has to be spread across canisters too.
+- **Reads.** Queries are cheap and parallel, but each canister gets at most 2 query threads per node, so a hot read set has to be spread across canisters too.
 - **Storage headroom.** 500 GiB per canister is a ceiling, not a promise, because all canisters on a subnet share 2 TiB. Above 750 GiB of subnet usage, storage reservation fees start ([cycle costs][cycles]).
 
 Unbounded size comes for free once the design scales out.
@@ -39,17 +49,18 @@ Unbounded size comes for free once the design scales out.
 | v1 issue | v2 answer |
 |---|---|
 | Index canister on every `get`/`put` (two to three hops) | Clients route directly to shards using a cached shard map (§4) |
-| `put` and `addKeyToShard` callable by anyone | Allowlist checked inside each shard; admin restricted to controllers (§6) |
-| Heap BTree described as "stable memory"; `stableVarQuery` used as a memory check | EOP heap, stated plainly; memory measured with `canister_status`/runtime stats (§5) |
+| `put` and `addKeyToShard` callable by anyone | Allowlist checked inside each shard; admin restricted to controllers (§7) |
+| Heap BTree described as "stable memory"; `stableVarQuery` used as a memory check | EOP heap, stated plainly; memory measured with `canister_status`/runtime stats (§6) |
 | Shard growth never wired up | Explicit split/move protocol driven by the index (§4.3) |
-| 15 B cycles attached to every call | No cycles on data calls. Cycles move only for creation and top-ups (§7) |
-| No top-up, no child upgrades | Index runs top-up and rolling upgrades (§7, §8) |
+| 15 B cycles attached to every call | No cycles on data calls. Cycles move only for creation and top-ups (§8) |
+| No top-up, no child upgrades | Index runs top-up and rolling upgrades (§8, §9) |
 | No delete; overwrite left a stale location | No per-key location directory. Location is a pure function of the key, so delete and overwrite are local (§4) |
 
 ### Prior art
 
-- **CanDB** (canscale → [ORIGYN-SA/CanDB][candb]) uses a partition-key/sort-key model with a canister per partition. Its repo was last pushed 2024-03-20, so treat it as dormant. Ekvm v2 borrows the PK/SK idea and adds client-side routing and rebalancing.
-- **`mo:core/Map`** ([motoko-core][core], v2.7.0) is a B-tree of order 32 that is stable under EOP. It is derived from the same StableHeapBTreeMap that v1 used, and it is our in-shard index.
+- **CanDB** (canscale → [ORIGYN-SA/CanDB][candb]) uses a partition-key/sort-key model with a canister per partition. Its repo was last pushed 2024-03-20, so treat it as dormant. Ekvm v2 borrows the PK/SK idea and adds client-side routing, rebalancing and secondary indexes.
+- **`mo:core/Map`** ([motoko-core][core], v2.7.0) is a B-tree of order 32 that is stable under EOP. It is derived from the same StableHeapBTreeMap that v1 used, and it is our in-shard storage and index structure.
+- Design borrowings from outside the IC: Redis Cluster (hash slots), DynamoDB (local vs global secondary indexes, async GSI propagation), YCSB (benchmark workloads).
 
 ---
 
@@ -57,28 +68,58 @@ Unbounded size comes for free once the design scales out.
 
 **Goals**
 1. Horizontal write and read throughput: add shards, including on other subnets, without downtime.
-2. One network hop per operation on the hot path. The index is never consulted per request.
+2. One network hop per point operation. The index canister is never consulted per request.
 3. Per-key linearizable writes, optimistic concurrency (version / CAS), and idempotent retries.
-4. Ordered range scans within a partition key, so the common bidding pattern of "all ads of campaign X" hits one shard.
-5. Operable by one person: automatic cycle top-ups, rolling upgrades with snapshots, metrics.
-6. A Motoko library (mops package) plus a TypeScript client.
+4. Ordered range scans within a partition key (single shard).
+5. **User-defined secondary indexes** over any field or composite of fields, with **global ordered scans** (range, top-N, pagination) across all shards (D1).
+6. Operable by one person: automatic cycle top-ups, rolling upgrades with snapshots, metrics.
+7. A Motoko library (mops package) plus a TypeScript client. Application-agnostic (D3).
 
 **Non-goals (v1 of the rewrite)**
-- Cross-shard transactions or global secondary indexes.
-- Ordered scans across partition keys (global range queries).
-- Certified (subnet-signed) query responses. See open question Q2.
-- Running the auction itself. Ekvm stores and serves data; ranking logic belongs to the app.
+- Cross-shard transactions.
+- Globally unique secondary indexes (uniqueness can only be enforced per shard).
+- Snapshot-isolated global scans (§5.6).
+- Certified (subnet-signed) query responses (D2, §10).
+- A query language, joins, or aggregation beyond ordered scans.
 - Mainnet deployment or cycle purchasing tooling.
 
 ---
 
 ## 3. Data model and API
 
-**Key** = `(pk : Blob, sk : Blob)`.
-- `pk` (partition key) decides placement, e.g. `campaignId`.
-- `sk` (sort key) orders data within a partition, e.g. `adId`, or `"bid#" # ts`.
+**Primary key** = `(pk : Blob, sk : Blob)`.
+- `pk` (partition key) decides placement.
+- `sk` (sort key) orders entries within a partition.
 
-**Value** = `Blob`, at most 1 MiB, so a batch still fits under the 2 MiB message limit. Each entry also carries a `version : Nat64` (a per-shard monotonically increasing write counter) and an optional `ttl`.
+**Value** = `Blob`, at most 1 MiB, so a batch still fits under the 2 MiB message limit. Each entry also carries:
+- a `version : Nat64`, a per-shard monotonically increasing write counter;
+- an optional `ttl`;
+- the entry's current secondary index keys, used to remove stale index entries on overwrite or delete (§5.2).
+
+### Secondary indexes
+
+An index is declared in code in a `Schema` module that the library user compiles into their shard wasm:
+
+```motoko
+type IndexDef = {
+  id : Nat16; name : Text;
+  extract : (pk : Blob, sk : Blob, value : Blob) -> ?Blob;  // null = not indexed
+};
+```
+
+`extract` returns an **order-preserving encoded** index key. The library ships encoders for both Motoko and TS, with shared test vectors:
+- `Nat`/`Int` as fixed-width big-endian, with a sign-bit flip for signed values;
+- `Float` (IEEE-754 bit trick);
+- `Text` (UTF-8 with escaping and a terminator, so prefixes sort correctly);
+- `desc(x)` (bitwise complement);
+- tuples (concatenation of self-delimiting parts).
+
+The physical index key is always `ixKey ‖ pk ‖ sk`. This makes the order total, so there are no ties even when many entries share a value, and it gives a stable tiebreaker.
+
+**Why shard-side extraction instead of client-supplied index keys:**
+- Writers can't produce inconsistent index keys.
+- A new index can be backfilled from existing values.
+- The cost is that adding or changing an index requires a shard upgrade plus a backfill job (§4.4). See Q1.
 
 ### Shard API (Candid; the client library wraps it)
 
@@ -90,28 +131,43 @@ type WriteOp = { #put : { key : Key; value : Blob; cond : Cond }
                ; #delete : { key : Key; cond : Cond } };
 type Err     = { #wrongShard : { epoch : Nat64 }              // client must refresh map
                ; #conflict : { key : Key; current : ?Nat64 }
-               ; #unauthorized; #tooLarge; #migrating };
+               ; #unauthorized; #tooLarge; #migrating; #unknownIndex };
+type Bound   = { #incl : Blob; #excl : Blob; #unbounded };
+type IxRow   = { ixKey : Blob; key : Key; version : Nat64; value : ?Blob };
 
 // updates
-write  : (req : { epoch : Nat64; requestId : Blob; ops : [WriteOp] })
-           -> async Result<[Nat64], Err>;   // all-or-nothing within one shard
+write   : (req : { epoch : Nat64; requestId : Blob; ops : [WriteOp] })
+            -> async Result<[Nat64], Err>;   // all-or-nothing within one shard, incl. local indexes
 // queries
-get    : query ({ epoch : Nat64; keys : [Key] }) -> async Result<[?Entry], Err>;
-scan   : query ({ epoch : Nat64; pk : Blob; from : ?Blob; to : ?Blob;
-                  limit : Nat; reverse : Bool }) -> async Result<{ entries : [Entry]; next : ?Blob }, Err>;
+get     : query ({ epoch : Nat64; keys : [Key] }) -> async Result<[?Entry], Err>;
+scan    : query ({ epoch : Nat64; pk : Blob; from : Bound; to : Bound;
+                   limit : Nat; reverse : Bool }) -> async Result<{ entries : [Entry]; next : ?Blob }, Err>;
+ixScan  : query ({ epoch : Nat64; index : Nat16; from : Bound; to : Bound; after : ?Blob;
+                   limit : Nat; reverse : Bool; withValues : Bool })
+            -> async Result<{ rows : [IxRow]; more : Bool }, Err>;   // this shard's slice, in order
 ```
 
-- A batch `write` to one shard executes as a single message, so it is atomic.
-- The client library splits a multi-key batch by shard and sends the parts in parallel. Across shards there is **no** atomicity (§9).
-- `scan` is paginated by an instruction budget as well as `limit`, so it stays under the 5 B query instruction limit.
+- A batch `write` to one shard executes as a single message, so it is atomic, including the shard's local index updates.
+- The client library splits a multi-key batch by shard and sends the parts in parallel. Across shards there is **no** atomicity (§10).
+- `scan` and `ixScan` are paginated by an instruction budget as well as `limit`, so they stay under the 5 B query instruction limit and the 3 MiB response limit.
 
-### Index API
+### Client API (TS and Motoko)
+
+```ts
+put / get / delete / batch(ops)
+scan(pk, range, opts)                       // single shard
+query(index, range, { limit, reverse, cursor, withValues })   // global ordered scan, §5
+  → { rows, cursor | null }
+topN(index, n, { reverse }) = query(index, unbounded, { limit: n, ... })
+```
+
+### Index-canister API
 
 ```motoko
-shardMap   : query () -> async { epoch : Nat64; slots : [(Nat16, Nat16, Principal)] }  // slot ranges → shard
+shardMap   : query () -> async { epoch : Nat64; slots : [(Nat16, Nat16, Principal)]; schemaVersion : Nat };
 // admin, controllers only:
 addWriter / removeWriter / setReaders;  addShard(subnet : ?Principal);  moveSlots(range, to);
-uploadShardWasm(chunk) / commitShardWasm(sha256);  upgradeShards(plan);  status()
+uploadShardWasm(chunk) / commitShardWasm(sha256);  upgradeShards(plan);  backfillIndex(id);  status()
 ```
 
 ---
@@ -121,21 +177,21 @@ uploadShardWasm(chunk) / commitShardWasm(sha256);  upgradeShards(plan);  status(
 ```mermaid
 flowchart LR
   subgraph Client["Client (TS lib / Motoko lib)"]
-    C[cached shard map<br/>epoch N]
+    C[cached shard map<br/>epoch N<br/>k-way merge]
   end
   subgraph SubnetA["Subnet A"]
     I[Index canister<br/>slot map · wasm · cycles · admin]
-    S1[Shard 1<br/>slots 0..21844]
+    S1[Shard 1<br/>slots 0..21844<br/>primary + local indexes]
     S2[Shard 2<br/>slots 21845..43689]
   end
   subgraph SubnetB["Subnet B"]
     S3[Shard 3<br/>slots 43690..65535]
   end
   C -- "shardMap (query, on start / on #wrongShard)" --> I
-  C -- "get/scan (query) · write (update)" --> S1
+  C -- "get/scan/ixScan (query) · write (update)" --> S1
   C --> S2
   C --> S3
-  I -. "assign slots · top-up · upgrade · status" .-> S1
+  I -. "assign slots · top-up · upgrade · backfill · status" .-> S1
   I -.-> S2
   I -.-> S3
 ```
@@ -145,8 +201,8 @@ flowchart LR
 - `slot = hash(pk) mod 65536`, using SHA-256 truncated to 16 bits so the hash is stable across languages.
 - The slot map assigns contiguous slot ranges to shards. This is the Redis Cluster model.
 - **Why slots and not a consistent-hash ring:** moving one slot range is an explicit, bounded unit of migration. The map is small (ranges, typically under 1 KB). Ownership is easy to verify on the shard side.
-- **Why hash and not range partitioning:** hashing spreads hot campaigns. Ordered scans are still available *within* a `pk`, which covers the bidding access pattern. Global ordered scans are a non-goal (see Q1).
-- **Hot partition caveat:** a single `pk` can't be split. If one campaign could exceed one shard's write rate, the app has to shard that key itself, e.g. `pk = campaignId # bucket`.
+- **Why hash for the primary key:** it spreads load evenly regardless of how keys are distributed. Orders other than "within one `pk`" are served by secondary indexes (§5).
+- **Hot partition caveat:** a single `pk` can't be split. If one partition could exceed one shard's write rate, the application has to spread it itself, e.g. `pk = id # bucket`.
 
 ### 4.2 Client-side routing
 
@@ -154,14 +210,14 @@ flowchart LR
 - Every request carries the client's `epoch`.
 - Each shard holds its own copy of the ranges it owns, pushed by the index. It answers `#wrongShard { epoch }` when it doesn't own the slot. The client then refreshes the map and retries once.
 - The index is never on the hot path. If the index is down, data traffic continues.
-- Composite queries are **same-subnet and ingress-only** ([Canisters][canisters]). They therefore can't be the general fan-out mechanism. Cross-shard reads are fanned out by the client in parallel.
+- Composite queries are **same-subnet and ingress-only** ([Canisters][canisters]). They therefore can't be the general fan-out mechanism. Cross-shard reads are fanned out by the client in parallel (§5.4).
 
 ### 4.3 Split / move protocol
 
 The index runs the protocol. Each step is persisted before every `await`, so a crash or trap resumes from a timer.
 
 1. **Trigger.** A shard exceeds a configured write rate or memory threshold (default: heap > 2 GiB), or the operator calls `moveSlots`. The index creates the target shard if needed.
-2. **Copy.** The source shard marks range R as `migrating → T` and starts a per-range change log. The index pulls snapshot pages from the source and pushes them to T with batched `write` calls. During this phase the source still serves reads and writes for R.
+2. **Copy.** The source shard marks range R as `migrating → T` and starts a per-range change log. The index pulls snapshot pages from the source and pushes them to T with batched `write` calls. During this phase the source still serves reads and writes for R. T rebuilds local index entries as it ingests, using the same `extract`.
 3. **Catch-up.** The index replays the change log to T, repeating until the log is small.
 4. **Cutover.** The source freezes writes on R (writes get `#migrating` and the client retries with backoff). The index drains the final log, then:
    - T becomes owner of R.
@@ -169,36 +225,168 @@ The index runs the protocol. Each step is persisted before every `await`, so a c
    - The index bumps `epoch`.
 
    The freeze lasts roughly 2–3 update rounds.
-5. **Cleanup.** The source deletes R's data in background batches, using a timer and staying within the instruction budget.
+5. **Cleanup.** The source deletes R's data and its local index entries in background batches, using a timer and staying within the instruction budget.
 
 Merging two shards is the same protocol run in reverse. Shard deletion is manual for now.
 
+During a move, a global scan may see R on both shards. The source keeps serving R until cutover and filters out slots it no longer owns after it. `ixScan` rows from a shard are therefore restricted to slots that shard currently owns, so a page never double-counts.
+
+### 4.4 Adding or changing an index
+
+1. Deploy a shard wasm whose `Schema` adds index `id` in state `#building` (§9).
+2. The index canister runs `backfillIndex(id)`: each shard walks its primary map in instruction-bounded batches on a timer and builds the entries.
+3. New writes maintain the index immediately.
+4. When every shard reports done, the index flips the index to `#ready`. Until then, `query` on the index returns `#unknownIndex`, or `#building` with an explicit opt-in.
+
+Dropping an index is the same process run in reverse.
+
 ---
 
-## 5. Storage inside a shard
+## 5. Global ordered scans over secondary indexes (D1)
 
-**Decision: EOP heap with `mo:core/Map<Blob, Entry>`, keyed by `pk ‖ sk` with a length prefix.**
+**Requirement:** for any declared index, return entries across **all** shards in index order:
+- in a range or from the top (top-N);
+- paged with a cursor;
+- at query latency.
+
+### 5.1 Options
+
+**(a) Global secondary index (GSI) shards, range-partitioned.** Separate canisters own contiguous ranges of `ixKey ‖ pk ‖ sk`. Primary shards propagate index changes to them.
+- Reads: a top-N or range page touches one or two GSI shards. Latency is about one query, independent of the number of primary shards S.
+- Writes: each change to an index key costs, in addition to the primary write:
+  - an outbox entry;
+  - a delete on the old key's GSI shard;
+  - an insert on the new key's GSI shard.
+
+  The old and new keys may sit on different shards. That is 1–2 extra inter-canister update calls per changed index per write, plus execution on both sides (260 K cycles per call plus per byte and instructions [cycles]).
+- Consistency: asynchronous, because a single message can't span canisters. The index lags the primary, and while a key changes the GSI can briefly show the entry twice or not at all.
+- Ops: a second partitioning scheme with range split/merge, plus hot-range handling. Monotonic keys (timestamps) or a popular top range concentrate writes on one GSI shard. Range splits can cut inside a run of equal values because the key includes `pk ‖ sk`, but a write hot spot on the newest range still moves along with the data.
+- Requires a durable outbox, idempotent apply with per-source sequence numbers, repair and rebuild tooling, and cycles for every propagation.
+
+**(b) Local indexes plus scatter-gather k-way merge.** Every primary shard keeps a local B-tree per index, updated in the same message as the primary write. A global scan queries every shard's `ixScan` in parallel and merges the ordered streams on the client.
+- Reads: S parallel queries per page. Latency is about the slowest of S queries plus merge time. Read work grows with S: up to S×N rows are fetched to return N.
+- Writes: zero amplification across canisters. The index update is a local B-tree delete+insert inside the same atomic message.
+- Consistency: each shard's slice is exactly consistent with its primary data. Across shards, the scan is not a snapshot (§5.6), the same as any other cross-shard read.
+- Ops: nothing new. Index entries move with their primary rows during splits.
+
+**(c) Hybrid.** Local indexes everywhere (b) as the default and source of truth. An index can opt in to a GSI tier (a) that is fed asynchronously from the shards' local change logs. Queries use the GSI when the index has one and its lag is under a bound, and fall back to scatter-gather otherwise.
+
+### 5.2 Recommendation: (c), staged. Ship (b) first and design (a) as an opt-in tier gated on measurements
+
+- **(b) is correct by construction and cheap for writes,** and on the IC read fan-out is cheaper than write fan-out:
+  - Queries cost no cycles and run on any of the subnet's replicas.
+  - Updates are the scarce resource: 4 threads per subnet, ~1–2 s, and they cost cycles.
+  - A GSI turns every index change into 1–2 extra updates on other canisters, competing for exactly that resource.
+- **(b) degrades with S.** Every page touches every shard, so tail latency is the slowest of S, and read cost scales with S×N. Somewhere between "tens" and "hundreds" of shards this stops meeting targets. **The crossover point is unknown and is the main thing the M3/M5 benchmarks must establish.**
+- **So:** v1 implements (b) for every index. The API and cursor format are designed so that (a) can be added per index later (`IndexDef.global = true`) without changing client code. Implementing (a) is a decision gate at M6, based on numbers.
+- **Unknowns, stated plainly:**
+  - the real per-query latency distribution on mainnet, especially p99 with fan-out;
+  - boundary-node and HTTP gateway rate limits for many parallel queries from one client **[unverified]**;
+  - how large S gets for realistic datasets, given that throughput, not size, drives splitting.
+
+Overwrites in (b):
+- The shard stores each entry's current index keys.
+- On `put`, it diffs old and new keys and does `delete(old) + insert(new)` in the local index, in the same message.
+- On `delete`, it removes all of the entry's index keys.
+
+As a result, index entries can never go stale.
+
+### 5.3 Merge algorithm and pagination cursor
+
+**One page of N rows:**
+- The client sends `ixScan(index, range, after = cursor.after, limit = N)` to every shard.
+- Each shard returns up to N rows in order, plus `more`.
+- The client k-way merges the streams with a heap and returns the first N rows.
+- The cursor is the last returned physical key.
+
+This is exact, because the global order is total and each shard resumes strictly after the same key.
+
+**Adaptive mode (optional, M3 decides the default):**
+- Ask each shard for `ceil(c·N/S)` rows, with c ≈ 2.
+- Any shard whose last row still sorts before the N-th merged row and which reported `more` gets a second round.
+- This cuts read work by about S/c at the cost of an occasional second round-trip.
+
+**Cursor (opaque to callers; Candid-encoded and base64 in TS):**
+
+```motoko
+type Cursor = {
+  v : Nat8;                 // format version
+  index : Nat16; schemaVersion : Nat;
+  from : Bound; to : Bound; reverse : Bool;
+  after : Blob;             // last returned ixKey ‖ pk ‖ sk
+  epoch : Nat64;            // hint only; a stale epoch just refreshes the map
+};
+```
+
+The cursor is **stateless**: no server-side session. It survives shard splits and moves, because it names a position in key space, not a shard. It is also valid unchanged against a future GSI tier.
+
+### 5.4 Fan-out on the IC
+
+- **Client-side parallel queries** are the general mechanism.
+  - The TS client issues S concurrent `query` calls.
+  - The Motoko client, used from another canister, can only make these as inter-canister calls. From an update that costs cycles and update latency. From a composite query it is limited to the same subnet. Canister callers that need global scans should therefore expect update latency (~1–2 s) unless the shards are co-located.
+- **Optional per-subnet gather** (M5):
+  - Each subnet gets a small stateless "gather" canister exposing a **composite query** that fans out to the shards on its own subnet and merges them.
+  - The client then contacts one gather canister per subnet instead of S shards.
+  - Limits:
+    - same-subnet only;
+    - callable only by external clients;
+    - total instructions are bounded across the whole composite evaluation (`MAX_CYCLES_PER_QUERY`);
+    - there are also maximum call-depth and wall-clock limits, whose values are **[unverified]** ([IC spec][spec]);
+    - a shard migrated to another subnet breaks the gather until the map is refreshed.
+- **Page size cap:** `N ≤ 1,000` rows, and `withValues` responses are capped by bytes, since a query response is at most 3 MiB.
+
+### 5.5 Skew and hot spots
+
+- **Many entries with the same index value** (e.g. a popular category or status) aren't a correctness issue, because the `pk ‖ sk` suffix makes the order total. In (b) placement follows the primary hash, so equal values spread across shards automatically.
+- **Top-of-range read hot spots** in (b) are spread over all shards' query threads. In (a) they would hit one GSI shard, whose 2 query threads per node become the limit and would need read replicas. This is a further point in favour of (b) first.
+- **Low-selectivity indexes** (few distinct values) make range scans long, but `limit` and the instruction budget bound each page.
+
+### 5.6 Scan semantics
+
+- A global scan reads each shard at a different moment, from a single replica (D2).
+- An entry whose index key changes between pages can be seen twice or skipped, the usual "read committed" pagination behaviour.
+- Within one shard's slice, rows are exactly consistent with that shard's primary data at the time of the query.
+- Snapshot scans would need multi-version storage (keeping old versions until a scan's timestamp expires) and are a non-goal. See Q2.
+
+### 5.7 Latency targets (to be measured)
+
+| Operation | Target | Basis |
+|---|---|---|
+| Point `get` | 1 query round trip (~200 ms per docs) | [icc] |
+| Single-shard `scan` page | 1 query round trip | [icc] |
+| Global `query`/`topN` page, S ≤ 16 | p50 ≤ 1.5× a single query **[target]** | Parallel fan-out; tail grows with S |
+| Global page, S = 64 | Measure; drives the M6 GSI gate **[target]** | — |
+| `write` | ~1–2 s (update) | [canisters] |
+
+PocketIC and local replicas give instruction and message counts, not real network latency. Real latency numbers need a mainnet test, which needs the user's explicit approval (§12).
+
+---
+
+## 6. Storage inside a shard
+
+**Decision: EOP heap with `mo:core/Map<Blob, Entry>` for the primary data, keyed by `pk ‖ sk` with a length prefix, plus one `Map<Blob, ()>` per local index, keyed by `ixKey ‖ pk ‖ sk`.**
 
 - **Pros:** no manual memory layout, native-speed access, upgrades independent of heap size, and type-checked upgrade compatibility ([EOP][eop]).
-- **Cons:** capacity is bounded by the heap (6 GiB on wasm64), and EOP's 64-bit layout can use up to 2× more memory ([changelog][changelog]). We keep shards well under that: the 2 GiB split trigger leaves GC and migration headroom. For this workload, the throughput limits trigger a split long before size does.
+- **Cons:** capacity is bounded by the heap (6 GiB on wasm64), and EOP's 64-bit layout can use up to 2× more memory ([changelog][changelog]). We keep shards well under that: the 2 GiB split trigger leaves GC and migration headroom. Index entries add memory roughly proportional to (entries × indexes × key size), which counts toward the trigger.
 - **Regions (stable memory), rejected for v1.**
   - The docs say to use them "only if enhanced orthogonal persistence does not fit your use case". Access is "significantly higher" cost, and layout and free-space management are manual ([Stable memory and regions][regions]).
-  - The default page cap is also inconsistent in the docs: the compiler reference says `--max-stable-pages` defaults to 100 GiB ([compiler ref][mocref]), while `core/Region.mo` says 4 GiB. **[unverified which applies]**
-  - We keep storage behind a `Store` interface so that a Region-backed store can be added later, e.g. for very large cold values.
+  - The default page cap is inconsistent in the docs: the compiler reference says `--max-stable-pages` defaults to 100 GiB ([compiler ref][mocref]), while `core/Region.mo` says 4 GiB. **[unverified which applies]**
+  - Storage sits behind a `Store` interface so that a Region-backed store can be added later, e.g. for large cold values.
 - **Memory measurement:** heap size from the runtime (`Prim.rts_heap_size` / `rts_memory_size`) and `canister_status.memory_metrics` from the index. **[unverified: exact core API names]**
 - Set `wasm_memory_limit` on each shard as a hard stop, plus `wasm_memory_threshold` so a low-memory hook fires early ([management canister][mgmt]). **[unverified: Motoko `system func lowmemory` support]**
 - **Rescue path:** a controller-only `exportRange` query, as recommended in the EOP docs.
 
 ---
 
-## 6. Access control
+## 7. Access control
 
 | Role | Who | Can |
 |---|---|---|
 | Admin | Controllers of the index (`Principal.isController`) | Everything in the index admin API |
 | Writer | Principals on the allowlist (user principals or app canisters) | `write` on shards |
-| Reader | `public`, or an allowlist (configurable) | `get`, `scan` |
-| Index | The index canister principal | Internal shard methods: assign slots, migrate, export |
+| Reader | `public`, or an allowlist (configurable) | `get`, `scan`, `ixScan` |
+| Index | The index canister principal | Internal shard methods: assign slots, migrate, backfill, export |
 
 - Shards hold their own copy of the allowlist, pushed by the index on change and versioned. Authorization is a local check, with no call on the hot path.
 - Shard controllers are the index plus an optional operator principal kept as a break-glass rescue. The shard `status_visibility` is set to the index.
@@ -207,7 +395,7 @@ Merging two shards is the same protocol run in reverse. Shard deletion is manual
 
 ---
 
-## 7. Cycles
+## 8. Cycles
 
 Official costs on a 13-node subnet ([cycle costs][cycles]):
 
@@ -223,6 +411,7 @@ Official costs on a 13-node subnet ([cycle costs][cycles]):
 On the fiduciary subnet, multiply by ×2.6. Use the `ic0.cost_*` APIs instead of hard-coding these numbers ([management canister][mgmt]).
 
 - **Data calls carry no cycles.** v1 attached 15 B cycles to each call (about 3,000× an update base fee), and this was removed. The receiving shard pays for ingress and execution from its own balance.
+- Local indexes cost only the extra instructions inside the same message. A future GSI tier would add inter-canister calls per index change (§5.1); the benchmarks report cycles per write for both.
 - **Creation:**
   - Same subnet: the index calls `create_canister` with `creation fee + initial balance` attached (default initial balance 2 T).
   - Another subnet: the management canister creates on the caller's subnet ([forum][subnetq]), so this goes through the CMC `create_canister` with `subnet_selection`. **[unverified: CMC call shape from a canister]** ([subnet selection][subsel])
@@ -233,9 +422,9 @@ On the fiduciary subnet, multiply by ×2.6. Use the `ic0.cost_*` APIs instead of
 
 ---
 
-## 8. Upgrading child canisters
+## 9. Upgrading child canisters
 
-- **Wasm storage:** the operator uploads the shard wasm to the index in chunks of 2 MiB or less, then calls `commitShardWasm(sha256)`. The index keeps the current and previous wasm.
+- **Wasm storage:** the operator uploads the shard wasm (which includes the user's `Schema`) to the index in chunks of 2 MiB or less, then calls `commitShardWasm(sha256)`. The index keeps the current and previous wasm.
   - Install uses `install_code` (a same-subnet request can be up to 10 MiB). For cross-subnet shards, or modules over the limit, use `upload_chunk` on the target plus `install_chunked_code` ([management canister][mgmt]).
 - **Upgrade mode:** `#upgrade` with `wasm_memory_persistence = ?#keep`, which EOP requires. Never use `#reinstall` or `replace`, because both drop the heap ([EOP][eop]).
 - **Rolling plan:**
@@ -243,85 +432,119 @@ On the fiduciary subnet, multiply by ×2.6. Use the `ic0.cost_*` APIs instead of
   2. Stop the canister. Shards make no outgoing calls, so it drains fast.
   3. Upgrade.
   4. Start.
-  5. Health check (`version()`, sample `get`).
+  5. Health check (`version()`, `schemaVersion`, sample `get`).
 
   Order: one canary shard, then batches of N. On failure, `load_canister_snapshot`, halt the plan, and report.
-- **Compatibility rule:** shard Candid changes are additive only, so clients and mixed-version shards keep working during a roll. EOP also rejects incompatible stable-type changes on upgrade, which leaves the shard unchanged.
-- A stopped shard is unavailable for about one round per upgrade. Clients see a reject and retry. This is acceptable because only one batch is down at a time.
+- **Compatibility rules:**
+  - Shard Candid changes are additive only, so clients and mixed-version shards keep working during a roll. EOP also rejects incompatible stable-type changes on upgrade, which leaves the shard unchanged.
+  - Schema changes are additive during a roll. A new index stays `#building` until every shard is upgraded and backfilled (§4.4).
+  - Changing an existing index's `extract` means defining a new index id and dropping the old one later.
+- A stopped shard is unavailable for about one round per upgrade. Clients see a reject and retry. A global scan that hits a stopped shard returns a retryable error rather than a silently incomplete page.
 
 ---
 
-## 9. Consistency and failure modes
+## 10. Consistency and failure modes
 
 | Scope | Guarantee |
 |---|---|
 | Single key, update path | Linearizable (single-threaded canister, atomic message) |
-| Batch on one shard | Atomic, all-or-nothing |
+| Batch on one shard | Atomic, all-or-nothing, including local index entries |
 | Batch across shards | Per-shard atomic only. Partial success is reported per shard |
-| `get`/`scan` (query) | Answered by one replica: may lag slightly and is **not certified** |
+| Local index vs primary | Always consistent (same message) |
+| `get`/`scan`/`ixScan` (query) | Answered by one replica: may lag slightly and is **not certified** (D2) |
+| Global scan | Per-shard consistent. Not a snapshot across shards or pages (§5.6) |
 | Read-your-writes | Use `getCertainly` (the same `get` sent as an update), ~1–2 s |
 
+- **D2, certified reads out of scope.** Uncertified query reads are accepted for v1. A certified path would need a Merkle tree over each shard's data, served with the subnet's certificate through certified data. Proving range and index scans also needs completeness proofs. That is a substantial feature, so it is deferred; `getCertainly` (update path) covers the occasional need for consensus-backed reads.
 - **Idempotency:** each `write` carries a client-chosen `requestId`. Shards keep a dedupe table (requestId → result) with a TTL (default 10 min), so retries after a timeout or a `SYS_UNKNOWN` are safe. CAS (`#version`) protects read-modify-write cycles.
-- **Index orchestration across `await`s** (top-up, split, upgrade):
+- **Index orchestration across `await`s** (top-up, split, backfill, upgrade):
   - Each step is a persisted state machine with a per-range lock.
   - Steps are written idempotently, e.g. `assignSlots(epoch)` is a no-op if already applied.
-  - Inter-canister calls state is not rolled back on reject, so state is committed before each `await` and checked after.
+  - State changes made before an `await` are not rolled back when the call is rejected, so state is committed before each `await` and re-checked after it.
   - Calls to our own shards use unbounded wait. Anything external, such as the CMC, uses bounded wait (`with timeout`) and treats `#system_unknown` as "check, then retry" ([Inter-canister calls][icc]).
-- **Stale client map:** `#wrongShard` triggers a refresh and one retry. Correctness never depends on clients' maps being fresh, because shards are the authority.
-- **Shard out of cycles or frozen:** its slots become unavailable, and the error surfaces to clients. The top-up margin (7 days of burn) and alerts are the mitigation. Data is not lost.
+- **Stale client map:** `#wrongShard` triggers a refresh and one retry. Correctness never depends on clients' maps being fresh, because shards are the authority. For global scans, the client re-fetches only the affected slice, using the same `after` cursor.
+- **Shard out of cycles or frozen:** its slots become unavailable, and the error surfaces to clients. Global scans fail loudly instead of skipping that shard. The top-up margin (7 days of burn) and alerts are the mitigation. Data is not lost.
 - **Index lost:** data traffic continues. A new index can rebuild the slot map from the shards, since each reports its own ranges and epoch.
-
----
-
-## 10. Latency expectations for the bidding use case
-
-| Path | Expected | Notes |
-|---|---|---|
-| Ad and campaign lookups (`get`, `scan` on one `pk`) | ~200 ms query round trip | One hop with a cached map. Scales with replicas × shards |
-| Candidate fan-out over k shards | ~max of k parallel queries | Done by the client, not a composite query |
-| Bid and budget writes | ~1–2 s | Batch them. Per subnet, the 4 update threads and ~1,000 messages per block are the ceiling, so add subnets to scale |
-| Spend counters | ~1–2 s plus batching delay | Overspend bounded by the batch window. Exact pacing is the app's job |
-
-Real-time per-impression auctions should therefore run on **query** reads of precomputed candidate sets, e.g. a `pk = segmentId` holding the ranked ad list. Writes update those sets asynchronously. This latency split is inherent to the IC and does not come from Ekvm. These numbers come from docs and have not been measured; M3 measures them.
 
 ---
 
 ## 11. Testing (local only, no mainnet)
 
-- **Unit tests:** `mops test` covering the slot hash, the Store, the CAS/dedupe logic, and the migration state machine. Slot-hash vectors are shared with the TS client.
+- **Unit tests:** `mops test` covering:
+  - the slot hash;
+  - the order-preserving encoders (vectors shared with the TS client);
+  - the Store and local index maintenance (overwrite and delete leave no stale entries);
+  - CAS/dedupe;
+  - the migration and backfill state machines;
+  - the k-way merge and the cursor.
 - **Integration tests:** `mops test --mode replica` on PocketIC (pinned version), plus `@dfinity/pic` from TypeScript for multi-canister and **multi-subnet** scenarios ([PocketIC][pic], [mops test][mopstest]). They cover:
-  - put/get/delete/scan
-  - stale epoch → `#wrongShard`
-  - a split under concurrent writes, checked for no lost or duplicated writes
-  - upgrade with EOP keep, plus snapshot rollback
-  - top-up below threshold
-  - access-control negatives
-  - a trap injected mid-migration, followed by resume
-- **Property test:** random op sequences against an in-memory model map, with random splits interleaved.
-- **Load test:** on PocketIC or a local replica, measure instructions per op and the ops-per-message ceiling. This yields per-shard capacity numbers. Real latency can't be measured locally.
+  - put/get/delete/scan;
+  - global `query`/`topN` equal to a sorted reference;
+  - pagination across a split;
+  - stale epoch → `#wrongShard`;
+  - a split under concurrent writes, checked for no lost or duplicated writes or index rows;
+  - index backfill;
+  - upgrade with EOP keep, plus snapshot rollback;
+  - top-up below threshold;
+  - access-control negatives;
+  - a trap injected mid-migration, followed by resume.
+- **Property test:** random op sequences against an in-memory model with an index, with random splits and moves interleaved. Invariants:
+  - the global scan equals the sorted model, where no concurrent writes occur;
+  - every page is ordered;
+  - no row appears twice within one shard slice.
 - No mainnet deployments and no real cycles without the user's explicit approval.
 
 ---
 
-## 12. Milestones
+## 12. Benchmark suite and demo (D3)
 
-| # | Deliverable | Done when |
+The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC with multiple subnets. A local replica can be used for rough latency only.
+
+| Workload | Mix | Purpose |
 |---|---|---|
-| M0 | Repo skeleton (mops, moc pinned, PocketIC pinned), slot hash with cross-language vectors | `mops test` green |
-| M1 | Single shard: Store on `core/Map`, write/get/scan/delete, CAS, dedupe, access control | Unit and replica tests green |
-| M2 | Index plus static multi-shard: shard map query, epoch checks, TS client routing | Multi-shard integration green |
-| M3 | Cycles: create, top-up, status/metrics. Instruction and throughput benchmarks | Benchmarks recorded in docs |
-| M4 | Split/move protocol with crash-resume | Split-under-load test green |
-| M5 | Wasm store and rolling upgrade with snapshots, multi-subnet placement (PocketIC) | Upgrade and rollback tests green |
-| M6 | README, examples (ad catalog demo), v0.1.0 tag (local only, not published) | Review with the user |
+| YCSB-A | 50% read / 50% update, Zipfian keys | Update-heavy baseline |
+| YCSB-B | 95% read / 5% update | Read-mostly |
+| YCSB-C | 100% read | Point-read ceiling |
+| YCSB-D | Read latest (insert + read recent) | Monotonic `sk`, hot recent data |
+| YCSB-E | Short range scans within `pk` + inserts | Single-shard scans |
+| IX-1 | Global `topN`/range pages on a numeric index, S = 1…64 | Fan-out scaling and the (b)→(a) crossover |
+| IX-2 | Index-key churn (updates that change the indexed value) | Write cost of index maintenance |
+| IX-3 | Skewed index values (few distinct values, Zipfian) | Tie-breaking and long ranges |
+| Example: synthetic ad auction | Campaigns/ads with a `desc(price)` index; topN + price updates | One illustrative workload combining IX-1/IX-2. No special treatment in the library |
+
+**Reported per workload:**
+- instructions and cycles per op;
+- messages per op;
+- rows fetched vs returned (fan-out waste);
+- per-shard and per-subnet ops/s ceilings (derived from instruction counts and the documented thread limits);
+- index memory overhead.
+
+**Not measurable locally:** real network latency and boundary-node behaviour. These are listed as **[target]** until a mainnet run, which needs explicit approval.
+
+**Demo:** a small TS script (and optional web page) that loads a synthetic dataset, declares two indexes, and shows point gets, a single-partition scan, and a paginated global top-N.
 
 ---
 
-## 13. Open questions
+## 13. Milestones
 
-1. **Scans.** Is "ordered scan within a partition key, hash placement across keys" enough? Or does the ad system need global ordered range scans, e.g. by bid price across all campaigns? Global scans would require range partitioning and change §4.1.
-2. **Trust in reads.** Is single-replica (uncertified) query data acceptable for auction reads? If advertisers must be able to *verify* fairness, we need certified data or update-path reads, which changes the latency budget.
-3. **Scope.** Is the ad/bidding system an active project? If so, M3's benchmarks should use its real record sizes and write rates. If not, Ekvm v2 is a general library and the demo is synthetic.
+| # | Deliverable | Done when |
+|---|---|---|
+| M0 | Repo skeleton (mops, moc pinned, PocketIC pinned). Slot hash and order-preserving encoders with cross-language vectors | `mops test` green |
+| M1 | Single shard: Store on `core/Map`, write/get/scan/delete, CAS, dedupe, access control, **`Schema` and local indexes and `ixScan`** | Unit and replica tests green |
+| M2 | Index canister plus static multi-shard: shard map query, epoch checks, TS client routing, **global `query`/`topN` via k-way merge and cursor** | Multi-shard tests: global scan equals reference |
+| M3 | Cycles: create, top-up, status/metrics. **Benchmark harness, YCSB A–E and IX-1…3, synthetic data generator** | Baseline numbers recorded in `docs/BENCH.md` |
+| M4 | Split/move protocol with crash-resume (local index entries move with their rows). **Index backfill/drop jobs** | Split-under-load test and scan-across-split test green |
+| M5 | Wasm store and rolling upgrade with snapshots, multi-subnet placement (PocketIC), **optional per-subnet composite-query gather** | Upgrade/rollback tests green, IX-1 re-run multi-subnet |
+| M6 | README, examples, demo (incl. the ad-auction example), v0.1.0 tag (local only, not published). **GSI decision gate:** go/no-go for tier (a), based on M3/M5 numbers | Review with the user |
+| M7 | *(conditional on M6)* GSI tier: range-partitioned index shards, outbox propagation, lag metric, fallback to scatter-gather | Lag-bounded consistency tests green |
+
+---
+
+## 14. Open questions
+
+1. **Index definitions in code.** Indexes are declared in a Motoko `Schema` compiled into the shard wasm, so adding an index means a rolling shard upgrade plus a backfill. Is that acceptable, or do you want indexes declared at runtime? Runtime declaration would require self-describing values (e.g. Candid records with field paths) and a generic extractor in the shard.
+2. **Scan semantics.** Are "read committed" global scans acceptable for v1? An entry whose index value changes between pages may be seen twice or skipped. The alternative, snapshot scans, needs multi-version storage.
+3. **Scale target.** What dataset size, write rate and shard count should the benchmarks treat as "success"? That sets the M6 threshold for building the GSI tier.
 
 ---
 
@@ -332,6 +555,7 @@ Real-time per-impression auctions should therefore run on **query** reads of pre
 [mgmt]: https://docs.internetcomputer.org/references/management-canister/
 [canisters]: https://docs.internetcomputer.org/concepts/canisters/
 [icc]: https://docs.internetcomputer.org/guides/canister-calls/inter-canister-calls/
+[spec]: https://docs.internetcomputer.org/references/ic-interface-spec/
 [eop]: https://docs.internetcomputer.org/languages/motoko/fundamentals/actors/orthogonal-persistence/enhanced/
 [op]: https://docs.internetcomputer.org/languages/motoko/fundamentals/actors/orthogonal-persistence/overview/
 [changelog]: https://docs.internetcomputer.org/languages/motoko/reference/changelog/
@@ -349,6 +573,7 @@ Real-time per-impression auctions should therefore run on **query** reads of pre
 - Management canister: <https://docs.internetcomputer.org/references/management-canister/>
 - Canisters (query/update/composite): <https://docs.internetcomputer.org/concepts/canisters/>
 - Inter-canister calls (bounded wait, reentrancy): <https://docs.internetcomputer.org/guides/canister-calls/inter-canister-calls/>
+- IC interface specification (composite query limits): <https://docs.internetcomputer.org/references/ic-interface-spec/>
 - Enhanced orthogonal persistence: <https://docs.internetcomputer.org/languages/motoko/fundamentals/actors/orthogonal-persistence/enhanced/>
 - Stable memory and regions: <https://docs.internetcomputer.org/languages/motoko/icp-features/stable-memory/>
 - Subnet selection: <https://docs.internetcomputer.org/guides/canister-management/subnet-selection/>
