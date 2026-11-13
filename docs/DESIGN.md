@@ -1,10 +1,10 @@
 # Ekvm v2: Design
 
-Status: draft for review · rev 2 · 2026-11-13 · License: Apache-2.0 (same as v1)
+Status: design complete (D1–D9) · rev 3 · 2026-11-13 · License: Apache-2.0 (same as v1)
 
 Ekvm ("Elastic Key-Value Map") is a **general-purpose** Motoko database library for the Internet Computer: a key-value store spread across many canisters, with user-defined secondary indexes and global ordered scans. This document covers a rewrite. The v1 code (`BarFTW/Ekvm`, 2024) is a reference for the idea only. No v1 code is reused.
 
-Facts marked **[unverified]** were not confirmed in official docs while this was written. They must be checked before we depend on them. Numbers marked **[target]** are design hypotheses to be measured, not measurements.
+Facts marked **[unverified]** were not confirmed in official docs while this was written. They must be checked before we depend on them. Numbers marked **[proposed target]** are design goals pending measurement, not measurements.
 
 ---
 
@@ -15,6 +15,12 @@ Facts marked **[unverified]** were not confirmed in official docs while this was
 | D1 | Global ordered scans across all shards are a requirement, over **user-defined secondary indexes** (any field or composite). Approach: §5 | 2026-11-13 |
 | D2 | Uncertified (single-replica) query reads are acceptable. A certified read path is **out of v1 scope** (§10) | 2026-11-13 |
 | D3 | Ekvm v2 is a generic library, not tied to any application. Validated by a synthetic benchmark suite (YCSB-like mixes, range and index scans), with ad auctions as at most one example workload (§12) | 2026-11-13 |
+| D4 | Secondary indexes are declared in Motoko code (`Schema` compiled into the shard wasm). Adding an index = rolling shard upgrade + backfill (§3, §4.4). Runtime-declared indexes are out of scope | 2026-11-13 |
+| D5 | Read-committed global scans are acceptable for v1: an entry whose index value changes between pages may appear twice or be skipped (§5.6). Snapshot scans are out of scope | 2026-11-13 |
+| D6 | Performance targets as in §5.7, **proposed targets pending measurement**. The 64-shard global-page p95 is the M6 go/no-go threshold for the global index tier | 2026-11-13 |
+| D7 | Benchmark uses YCSB-standard ~1 KB records: 100 M records, 3 secondary indexes, on **~50+ shards** (planned: 64) across multiple subnets (§5.7, §12). Supersedes D6's 16-shard benchmark scale | 2026-11-13 |
+| D8 | No mainnet runs for now: all benchmarks run on PocketIC. The mainnet cost estimates in §5.7 are kept as reference only | 2026-11-13 |
+| D9 | 32-shard ladder target confirmed: global top-100 page p50 < 600 ms, p95 < 1.2 s | 2026-11-13 |
 
 ---
 
@@ -78,7 +84,8 @@ Unbounded size comes for free once the design scales out.
 **Non-goals (v1 of the rewrite)**
 - Cross-shard transactions.
 - Globally unique secondary indexes (uniqueness can only be enforced per shard).
-- Snapshot-isolated global scans (§5.6).
+- Snapshot-isolated global scans (§5.6, D5).
+- Runtime-declared secondary indexes (D4).
 - Certified (subnet-signed) query responses (D2, §10).
 - A query language, joins, or aggregation beyond ordered scans.
 - Mainnet deployment or cycle purchasing tooling.
@@ -119,7 +126,7 @@ The physical index key is always `ixKey ‖ pk ‖ sk`. This makes the order tot
 **Why shard-side extraction instead of client-supplied index keys:**
 - Writers can't produce inconsistent index keys.
 - A new index can be backfilled from existing values.
-- The cost is that adding or changing an index requires a shard upgrade plus a backfill job (§4.4). See Q1.
+- The cost is that adding or changing an index requires a shard upgrade plus a backfill job (§4.4). Accepted (D4).
 
 ### Shard API (Candid; the client library wraps it)
 
@@ -347,19 +354,88 @@ The cursor is **stateless**: no server-side session. It survives shard splits an
 - A global scan reads each shard at a different moment, from a single replica (D2).
 - An entry whose index key changes between pages can be seen twice or skipped, the usual "read committed" pagination behaviour.
 - Within one shard's slice, rows are exactly consistent with that shard's primary data at the time of the query.
-- Snapshot scans would need multi-version storage (keeping old versions until a scan's timestamp expires) and are a non-goal. See Q2.
+- Snapshot scans would need multi-version storage (keeping old versions until a scan's timestamp expires) and are a non-goal. Read-committed behaviour is accepted for v1 (D5).
 
-### 5.7 Latency targets (to be measured)
+### 5.7 Performance targets (D6, proposed targets pending measurement)
 
-| Operation | Target | Basis |
+All numbers below are **[proposed target]**, not measurements. Latency percentiles are end-to-end from a TS client.
+
+| Operation | p50 | p95 | Other |
+|---|---|---|---|
+| Point read (`get`, 1 shard) | < 300 ms | < 600 ms | Docs quote ~200 ms per query ([icc]) |
+| Global ordered top-100 page, 16 shards | < 500 ms | < 1 s | Ladder step 1 (D6) |
+| Global ordered top-100 page, 32 shards | < 600 ms | < 1.2 s | Ladder step 2 (D9) |
+| Global ordered top-100 page, 64 shards | — | ≤ 1.5 s | Ladder step 3 = full benchmark scale (D7). **Exceeding this triggers building the global index tier (M6 go/no-go)** |
+| Long sequential scan (`scan`/`ixScan` pages) | — | — | Pages up to ~1 MB per shard; ≥ 10k records/s per participating shard |
+| Write cost per secondary index | — | — | < 20% extra instructions per write per index; **zero** inter-canister calls |
+| `write` latency | ~1–2 s | — | Update path ([canisters]); not a target, an IC property |
+
+**IC limits behind these targets (checked against [Resource limits][limits], 2026-11-13):**
+- Query response size: **3 MiB** for non-replicated queries; 2 MiB for replicated execution (an update or a replicated query, e.g. `getCertainly`). A ~1 MB page fits under both, with room for Candid overhead. Our page cap is by bytes (default 1 MiB), not only by row count.
+- Query instructions: **5 B** per query call. For composite queries the budget is shared across the whole evaluation, including callees (`MAX_CYCLES_PER_QUERY`, [IC spec][spec]).
+- Stable memory read per query: 1 GiB. Not relevant to the EOP heap store, but it would cap a future Region-backed store.
+- Throughput check: 10k records/s per shard at one ~1 MB page per ~200 ms round trip means ~2k records per page (~500 B/record) is enough, so the target leaves headroom. Instructions per scanned row must stay well under 5 B / rows-per-page (about 500 k instructions per row at 10k rows per page). **[unverified until M3 benchmarks]**
+
+**Benchmark scale (D7):** 100 M records of ~1 KB (YCSB standard), 3 secondary indexes, 1,000 writes/s aggregate, on **64 shards** across **4 subnets × 16 shards**.
+
+**Why 64 shards (arithmetic, not measured):**
+- Raw values come to 100 M × ~1 KB ≈ 93 GiB. Keys, 3 index entries per record, B-tree slack and the EOP 64-bit layout (up to 2×, [changelog]) bring the estimate to roughly **120–190 GiB**.
+- At the 2 GiB split trigger (§6) that needs about 60–95 shards. 64 shards means ~1.56 M records and ~1.5 GiB of raw values per shard, which fits under 2 GiB only if total overhead stays under ~1.35×.
+- M3 measures real bytes per record. If the overhead is higher, the benchmark either runs at 96 shards (6 subnets × 16) or raises the split trigger to 3 GiB, still well under the 6 GiB heap limit. **[unverified until M3]**
+
+**Why multiple subnets:**
+- 1,000 writes/s on one subnet would compete for its 4 update threads and come close to its message budget (up to 1,000 messages per block at 1–3 blocks/s, [limits]).
+- With 4 subnets, each subnet carries ~250 writes/s and each shard ~16 writes/s. Writes are batched by the client either way.
+- Storage is not the constraint: ~150 GiB fits within one subnet's 2 TiB. But placing all of it on one subnet would push that subnet toward the 750 GiB reservation threshold together with other tenants ([cycles]).
+- Query load for a 64-way fan-out is spread across 4 subnets' replicas instead of one subnet's 4 query threads per node.
+- Composite-query gather (§5.4) works per subnet, which gives 4 gather calls per page instead of 64 shard calls.
+
+**The ladder and the go/no-go point:**
+- Because 64 shards is now the benchmark scale itself, the M6 go/no-go is decided by the main benchmark rather than by an extrapolation.
+- The 16- and 32-shard targets remain useful as the **scaling curve**. They run with the same per-shard data size (~1.56 M records per shard, so 25 M and 50 M records total), which keeps per-shard work constant and isolates the fan-out effect.
+- A 16-shard target alone would no longer predict the 64-shard result. The slope from 16 to 32 to 64 is what tells us whether, say, 128 shards would still be viable.
+
+**Cost estimate on mainnet, for reference only: no mainnet runs are planned (D8)** (13-node subnets, cycle prices from [cycle costs][cycles], 1 T cycles = 1 XDR ≈ $1.37). These figures are **[unverified estimates]**: they assume ~3 M instructions per indexed 1 KB write, which M3 replaces with a measurement.
+
+| Item | Cycles | ≈ USD |
 |---|---|---|
-| Point `get` | 1 query round trip (~200 ms per docs) | [icc] |
-| Single-shard `scan` page | 1 query round trip | [icc] |
-| Global `query`/`topN` page, S ≤ 16 | p50 ≤ 1.5× a single query **[target]** | Parallel fan-out; tail grows with S |
-| Global page, S = 64 | Measure; drives the M6 GSI gate **[target]** | — |
-| `write` | ~1–2 s (update) | [canisters] |
+| Create 64 shards (500 B each) | 32 T | ~$44 (one-off) |
+| Initial balances (2 T each; spent only as used) | 128 T funded | ~$175 tied up, not spent |
+| Load 100 M records, batched (~5.3 M cycles/write) | ~530 T | ~$720 (one-off) |
+| Load 100 M records, unbatched (~11.4 M cycles/write) | ~1,140 T | ~$1,560 |
+| 1 h steady run at 1,000 writes/s, batched | ~19 T | ~$26 per hour |
+| Storage, 120–190 GiB (~329 B cycles per GiB-month) | 40–63 T/month | ~$55–85 per month |
+| Queries (reads, scans, global pages) | 0 | free |
 
-PocketIC and local replicas give instruction and message counts, not real network latency. Real latency numbers need a mainnet test, which needs the user's explicit approval (§12).
+Per-write breakdown:
+- **Unbatched:** 1.2 M ingress + 2.2 M for 1.1 KB of payload + 5 M update base + ~3 M instructions.
+- **Batched ×100:** the per-message fees are amortized, leaving ~2.2 M + ~3 M + small overhead.
+
+All benchmarks run on **PocketIC (free, multi-subnet)** (D8). Any future mainnet run, at full or reduced scale, would be a new decision needing the user's explicit approval and budget.
+
+PocketIC and local replicas give instruction and message counts, not real network latency. Latency targets can only be confirmed by a mainnet run, which is out of scope for now (D8). On PocketIC, latency results are indicative only.
+
+### 5.8 Computational complexity
+
+Notation: n = records per shard, S = shards, k = results requested (page size), i = secondary indexes, m = records in a moved slot range (m ≤ n). All structures are `mo:core/Map` B-trees (order 32), so each lookup, insert or delete costs O(log n). The primary map has n entries; each index map has at most n entries.
+
+| Operation | Per shard | Client / overall | Notes |
+|---|---|---|---|
+| Point read | O(log n) | Routing: O(1) slot hash + O(log S) binary search over cached slot ranges | 1 query, 1 shard |
+| Range scan within a partition | O(log n + k) | — | 1 shard, because a `pk` lives on one shard |
+| Global ordered page (scatter-gather) | O(log n + k) on **every** shard, in parallel | Merge O(k log S), plus O(S·k) to receive and decode | Fetches up to **S·k rows to return k** (S-fold overfetch) |
+| Global page, adaptive mode | O(log n + ⌈c·k/S⌉) per shard per round | ~c·k rows fetched, occasionally a 2nd round | §5.3 |
+| Write with i indexes | O((1 + 2i) log n) = O((1 + i) log n) | — | One message, **no inter-canister calls**. Overwrites delete the old index key and insert the new one (hence the 2i). Dedupe-table lookup adds O(log d) for d remembered request ids |
+| Delete with i indexes | O((1 + i) log n) | — | Same message |
+| Shard split / move | O(m) to copy, O(m (1 + i) log n′) to rebuild at the target | — | Incremental: background batches on a timer, each under the 40 B update instruction limit. Never one big message |
+| Index backfill (new index) | O(n log n) per shard | All shards in parallel | Incremental batches, like a split |
+
+**Corrections to the shorthand:**
+- The client merge itself is O(k log S), but the client still has to receive and decode up to S·k rows. Its total work and bandwidth are therefore O(S·k). That overfetch, and the fact that every page touches all S shards, motivate the optional global index tier.
+- A write with overwrites costs 1 + 2i tree operations (delete the old index key plus insert the new one). Asymptotically that is still O((1 + i) log n).
+- A split costs O(m) for the moved range, not O(n) for the whole shard. In the worst case m ≈ n/2.
+
+**For comparison, the optional global index tier (§5.1 (a)):** a page costs O(log n_g + k) on one or two index shards, with no S-fold overfetch. The price is that every write that changes an indexed value adds up to 2 inter-canister update calls per index, which is exactly what D6's "no inter-canister calls per index" target rules out for the default path.
 
 ---
 
@@ -519,7 +595,9 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 - per-shard and per-subnet ops/s ceilings (derived from instruction counts and the documented thread limits);
 - index memory overhead.
 
-**Not measurable locally:** real network latency and boundary-node behaviour. These are listed as **[target]** until a mainnet run, which needs explicit approval.
+**Scale and pass criteria:** the D7 dataset (100 M × ~1 KB records, 3 indexes, 1,000 writes/s aggregate, 64 shards on 4 PocketIC subnets) and the targets in §5.7, run as a ladder at 16, 32 and 64 shards with constant per-shard data. Smaller scales (1 M, 10 M records) run first in CI. Whether PocketIC on one box can hold ~150 GiB of state across 64 canisters is **[unverified]**. If it can't, the ladder uses the same per-shard size on fewer shards per run, and the full 64-shard run uses a reduced per-shard size (results labelled accordingly). Instruction-based targets (index write overhead, rows per page, records/s per shard derived from instructions) can be checked locally.
+
+**Not measurable locally:** real network latency and boundary-node behaviour. Latency targets stay **[proposed target]**: no mainnet run is planned (D8).
 
 **Demo:** a small TS script (and optional web page) that loads a synthetic dataset, declares two indexes, and shows point gets, a single-partition scan, and a paginated global top-N.
 
@@ -535,16 +613,14 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 | M3 | Cycles: create, top-up, status/metrics. **Benchmark harness, YCSB A–E and IX-1…3, synthetic data generator** | Baseline numbers recorded in `docs/BENCH.md` |
 | M4 | Split/move protocol with crash-resume (local index entries move with their rows). **Index backfill/drop jobs** | Split-under-load test and scan-across-split test green |
 | M5 | Wasm store and rolling upgrade with snapshots, multi-subnet placement (PocketIC), **optional per-subnet composite-query gather** | Upgrade/rollback tests green, IX-1 re-run multi-subnet |
-| M6 | README, examples, demo (incl. the ad-auction example), v0.1.0 tag (local only, not published). **GSI decision gate:** go/no-go for tier (a), based on M3/M5 numbers | Review with the user |
+| M6 | README, examples, demo (incl. the ad-auction example), v0.1.0 tag (local only, not published). **GSI decision gate:** go if the 64-shard global top-100 page p95 (the D7 benchmark scale) exceeds 1.5 s (D6), if the 16→32→64 ladder slope rules out larger deployments, or if the instruction-based targets fail | Review with the user |
 | M7 | *(conditional on M6)* GSI tier: range-partitioned index shards, outbox propagation, lag metric, fallback to scatter-gather | Lag-bounded consistency tests green |
 
 ---
 
 ## 14. Open questions
 
-1. **Index definitions in code.** Indexes are declared in a Motoko `Schema` compiled into the shard wasm, so adding an index means a rolling shard upgrade plus a backfill. Is that acceptable, or do you want indexes declared at runtime? Runtime declaration would require self-describing values (e.g. Candid records with field paths) and a generic extractor in the shard.
-2. **Scan semantics.** Are "read committed" global scans acceptable for v1? An entry whose index value changes between pages may be seen twice or skipped. The alternative, snapshot scans, needs multi-version storage.
-3. **Scale target.** What dataset size, write rate and shard count should the benchmarks treat as "success"? That sets the M6 threshold for building the GSI tier.
+None. The design is complete as of D1–D9. New questions found during implementation are added here.
 
 ---
 
