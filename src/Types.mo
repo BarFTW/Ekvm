@@ -1,4 +1,6 @@
-/// Shared wire types (DESIGN.md §3). M0 defines routing types; data types are used from M1.
+/// Shared wire types (DESIGN.md §3).
+import Result "mo:core/Result";
+
 module {
   public type Key = { pk : Blob; sk : Blob };
   public type Entry = { key : Key; value : Blob; version : Nat64 };
@@ -19,6 +21,40 @@ module {
     #migrating;
     #unknownIndex;
   };
+
+  public type WriteResult = Result.Result<[Nat64], Err>;
+  public type WriteReq = { route : Route; requestId : Blob; ops : [WriteOp] };
+
+  /// Range bound. For `scan` it compares sort keys exactly; for `ixScan` it is a
+  /// prefix bound on encoded index keys (see ENCODING.md "Index range bounds").
+  public type Bound = { #incl : Blob; #excl : Blob; #unbounded };
+
+  public type GetReq = { route : Route; keys : [Key] };
+  public type ScanReq = { route : Route; pk : Blob; from : Bound; to : Bound; limit : Nat; reverse : Bool };
+  /// `next` is the last returned sort key when more rows may follow; resume with
+  /// `from = #excl next` (or `to = #excl next` when `reverse`).
+  public type ScanPage = { entries : [Entry]; next : ?Blob };
+
+  public type IxScanReq = {
+    route : Route;
+    index : Nat16;
+    from : Bound;
+    to : Bound;
+    /// Exclusive resume position: the last row's (ixKey, key).
+    after : ?IxPos;
+    limit : Nat;
+    reverse : Bool;
+    withValues : Bool;
+  };
+  /// Position in an index. Rows are totally ordered by (ixKey, pk, sk),
+  /// compared component-wise as unsigned bytes.
+  public type IxPos = { ixKey : Blob; key : Key };
+  public type IxRow = { ixKey : Blob; key : Key; version : Nat64; value : ?Blob };
+  public type IxPage = { rows : [IxRow]; more : Bool };
+
+  public type Readers = { #public_; #allow : [Principal] };
+  /// Versioned allowlist pushed from the index to every shard (DESIGN.md §7).
+  public type Access = { version : Nat64; writers : [Principal]; readers : Readers };
 
   /// Range-compressed shard map (DESIGN.md §4.2).
   public type ShardMap = {

@@ -22,17 +22,20 @@ import Nat32 "mo:core/Nat32";
 import Nat64 "mo:core/Nat64";
 import Runtime "mo:core/Runtime";
 import Text "mo:core/Text";
+import VarArray "mo:core/VarArray";
 
 module {
   /// Big-endian, `n` least-significant bytes of `x`.
-  func be(x : Nat64, n : Nat) : [Nat8] {
-    Array.tabulate<Nat8>(
-      n,
-      func(i : Nat) : Nat8 {
-        let shift = (8 * (n - 1 - i) : Nat).toNat64();
-        ((x >> shift) & 0xff).toNat().toNat8();
-      },
-    );
+  func beVar(x : Nat64, n : Nat) : [var Nat8] {
+    let out = VarArray.repeat<Nat8>(0, n);
+    var v = x;
+    var i = n;
+    while (i > 0) {
+      i -= 1;
+      out[i] := (v & 0xff).toNat().toNat8();
+      v >>= 8;
+    };
+    out;
   };
 
   /// Minimal big-endian bytes of an unbounded `Nat` (empty for 0).
@@ -49,15 +52,15 @@ module {
   func prefixed(head : Nat, body : [Nat8]) : Blob = [head.toNat8()].concat(body).toBlob();
 
   public func nat8(x : Nat8) : Blob = [x].toBlob();
-  public func nat16(x : Nat16) : Blob = be(x.toNat().toNat64(), 2).toBlob();
-  public func nat32(x : Nat32) : Blob = be(x.toNat().toNat64(), 4).toBlob();
-  public func nat64(x : Nat64) : Blob = be(x, 8).toBlob();
+  public func nat16(x : Nat16) : Blob = beVar(x.toNat().toNat64(), 2).toBlob();
+  public func nat32(x : Nat32) : Blob = beVar(x.toNat().toNat64(), 4).toBlob();
+  public func nat64(x : Nat64) : Blob = beVar(x, 8).toBlob();
 
   /// Two's complement with the sign bit flipped, big-endian.
   public func int8(x : Int8) : Blob = [x.toNat8() ^ 0x80].toBlob();
-  public func int16(x : Int16) : Blob = be((x.toNat16() ^ 0x8000).toNat().toNat64(), 2).toBlob();
-  public func int32(x : Int32) : Blob = be((x.toNat32() ^ 0x8000_0000).toNat().toNat64(), 4).toBlob();
-  public func int64(x : Int64) : Blob = be(x.toNat64() ^ 0x8000_0000_0000_0000, 8).toBlob();
+  public func int16(x : Int16) : Blob = beVar((x.toNat16() ^ 0x8000).toNat().toNat64(), 2).toBlob();
+  public func int32(x : Int32) : Blob = beVar((x.toNat32() ^ 0x8000_0000).toNat().toNat64(), 4).toBlob();
+  public func int64(x : Int64) : Blob = beVar(x.toNat64() ^ 0x8000_0000_0000_0000, 8).toBlob();
 
   /// Unbounded `Nat`: one length byte, then minimal big-endian bytes. Traps above 255 bytes.
   public func nat(x : Nat) : Blob {
@@ -97,31 +100,46 @@ module {
     if (f.isNaN()) Runtime.trap("Encode.float: NaN is not encodable");
     let u : Nat64 = if (f == 0.0) 0 else floatBits(f);
     let k = if (u >> 63 == 1) (u ^ 0xffff_ffff_ffff_ffff) else (u | 0x8000_0000_0000_0000);
-    be(k, 8).toBlob();
+    beVar(k, 8).toBlob();
   };
 
   public func bool(b : Bool) : Blob = [(if b 1 else 0) : Nat8].toBlob();
 
   /// Byte string: 0x00 escaped as 0x00 0xFF, terminated by 0x00 0x00.
+  /// (Sized up front: one allocation plus the result; this is on the write path.)
   public func bytes(b : Blob) : Blob {
-    let out = List.empty<Nat8>();
+    var zeros = 0;
+    for (c in b.values()) if (c == 0) zeros += 1;
+    let out = VarArray.repeat<Nat8>(0, b.size() + zeros + 2);
+    var i = 0;
     for (c in b.values()) {
-      out.add(c);
-      if (c == 0) out.add(0xff : Nat8);
+      out[i] := c;
+      i += 1;
+      if (c == 0) { out[i] := 0xff; i += 1 };
     };
-    out.add(0 : Nat8);
-    out.add(0 : Nat8);
-    out.toArray().toBlob();
+    out.toBlob(); // the last two bytes stay 0x00 0x00
   };
 
   /// UTF-8 text, escaped like `bytes`. UTF-8 byte order = code point order.
   public func text(t : Text) : Blob = bytes(t.encodeUtf8());
 
   /// Descending order: complement every byte. Valid for any prefix-free encoding above.
-  public func desc(b : Blob) : Blob = b.toArray().map<Nat8, Nat8>(func(c) = c ^ 0xff).toBlob();
+  public func desc(b : Blob) : Blob {
+    let a = b.toVarArray();
+    var i = 0;
+    while (i < a.size()) { a[i] ^= 0xff; i += 1 };
+    a.toBlob();
+  };
 
   /// Composite key: concatenation of prefix-free parts.
-  public func tuple(parts : [Blob]) : Blob = parts.map<Blob, [Nat8]>(Blob.toArray).flatten().toBlob();
+  public func tuple(parts : [Blob]) : Blob {
+    var n = 0;
+    for (p in parts.values()) n += p.size();
+    let out = VarArray.repeat<Nat8>(0, n);
+    var i = 0;
+    for (p in parts.values()) for (c in p.values()) { out[i] := c; i += 1 };
+    out.toBlob();
+  };
 
   /// Lowercase hex, for tests and debugging.
   public func toHex(b : Blob) : Text {

@@ -2,7 +2,7 @@
 // Byte order of the output == natural order of the input. All encodings are
 // prefix-free, so they can be concatenated (tuple) and inverted (desc).
 
-const concat = (...parts: Uint8Array[]): Uint8Array => {
+export const concat = (...parts: Uint8Array[]): Uint8Array => {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
   for (const p of parts) { out.set(p, o); o += p.length; }

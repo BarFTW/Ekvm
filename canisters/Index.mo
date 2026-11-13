@@ -1,6 +1,7 @@
-/// Ekvm index canister: M0 skeleton. Holds the shard map, serves it to clients
-/// and pushes slot assignments to shards. Shard creation, top-up, split and
+/// Ekvm index canister. Holds the shard map and the access allowlist, serves
+/// the map to clients and pushes slot assignments and allowlists to shards. Shard creation, top-up, split and
 /// upgrade orchestration arrive in later milestones.
+import Array "mo:core/Array";
 import Nat "mo:core/Nat";
 import Principal "mo:core/Principal";
 import Runtime "mo:core/Runtime";
@@ -10,7 +11,12 @@ import T "../src/Types";
 actor class Index() {
   var map : T.ShardMap = { epoch = 0; slotBits = 16; shards = []; ranges = []; schemaVersion = 0 };
 
-  type ShardActor = actor { assign : (T.Assignment) -> async () };
+  var access : T.Access = { version = 0; writers = []; readers = #public_ };
+
+  type ShardActor = actor {
+    assign : (T.Assignment) -> async ();
+    setAccess : (T.Access) -> async ();
+  };
 
   func requireController(caller : Principal) {
     if (not caller.isController()) Runtime.trap("unauthorized: controllers only");
@@ -33,8 +39,38 @@ actor class Index() {
     for (i in Nat.range(0, shards.size())) {
       let s : ShardActor = actor (shards[i].toText());
       await s.assign(ShardMap.assignment(next, i.toNat16(), null));
+      await s.setAccess(access);
     };
   };
 
-  public query func version() : async Text { "ekvm-index/0.0.1 (M0)" };
+  /// Bump the allowlist version, commit, then push to every shard (DESIGN.md §7).
+  /// Shards ignore stale versions, so concurrent pushes converge.
+  func publish(next : { writers : [Principal]; readers : T.Readers }) : async () {
+    access := { version = access.version + 1; writers = next.writers; readers = next.readers };
+    let a = access;
+    for (p in map.shards.values()) {
+      let s : ShardActor = actor (p.toText());
+      await s.setAccess(a);
+    };
+  };
+
+  public shared ({ caller }) func addWriter(p : Principal) : async () {
+    requireController(caller);
+    if (access.writers.any(func(w : Principal) : Bool = w == p)) return;
+    await publish({ writers = access.writers.concat([p]); readers = access.readers });
+  };
+
+  public shared ({ caller }) func removeWriter(p : Principal) : async () {
+    requireController(caller);
+    await publish({ writers = access.writers.filter(func(w : Principal) : Bool = w != p); readers = access.readers });
+  };
+
+  public shared ({ caller }) func setReaders(r : T.Readers) : async () {
+    requireController(caller);
+    await publish({ writers = access.writers; readers = r });
+  };
+
+  public query func getAccess() : async T.Access { access };
+
+  public query func version() : async Text { "ekvm-index/0.1.0 (M1)" };
 };

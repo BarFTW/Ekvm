@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PocketIc, PocketIcServer, SubnetStateType, createIdentity } from "@dfinity/pic";
 import type { Principal } from "@icp-sdk/core/principal";
-import { indexIdl, shardIdl, shardInit } from "./idl.ts";
+import { indexIdl, shardIdl, shardInit } from "../src/idl.ts";
 import * as E from "../src/encode.ts";
 import { shardForKey, slotOfKey, validate, type ShardMap } from "../src/index.ts";
 
@@ -49,7 +49,7 @@ describe("M0 skeleton on PocketIC (2 subnets)", () => {
   test("shards sit on different subnets", async () => {
     const sa = await pic.getCanisterSubnetId(ids.a), sb = await pic.getCanisterSubnetId(ids.b);
     assert.notEqual(sa?.toText(), sb?.toText());
-    assert.equal(await index.version(), "ekvm-index/0.0.1 (M0)");
+    assert.equal(await index.version(), "ekvm-index/0.1.0 (M1)");
   });
 
   test("non-controller cannot register shards", async () => {
