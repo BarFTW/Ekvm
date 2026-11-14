@@ -49,7 +49,7 @@ describe("M0 skeleton on PocketIC (2 subnets)", () => {
   test("shards sit on different subnets", async () => {
     const sa = await pic.getCanisterSubnetId(ids.a), sb = await pic.getCanisterSubnetId(ids.b);
     assert.notEqual(sa?.toText(), sb?.toText());
-    assert.equal(await index.version(), "ekvm-index/0.1.0 (M1)");
+    assert.equal(await index.version(), "ekvm-index/0.2.0 (M2)");
   });
 
   test("non-controller cannot register shards", async () => {

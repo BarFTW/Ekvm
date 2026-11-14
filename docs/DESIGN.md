@@ -1,6 +1,6 @@
 # Ekvm v2: Design
 
-Status: design complete (D1–D9) · rev 3 · 2026-11-13 · License: Apache-2.0 (same as v1)
+Status: design complete (D1–D11) · rev 4 · 2026-11-14 · implementation: M0–M2 done · License: Apache-2.0 (same as v1)
 
 Ekvm ("Elastic Key-Value Map") is a **general-purpose** Motoko database library for the Internet Computer: a key-value store spread across many canisters, with user-defined secondary indexes and global ordered scans. This document covers a rewrite. The v1 code (`BarFTW/Ekvm`, 2024) is a reference for the idea only. No v1 code is reused.
 
@@ -22,6 +22,7 @@ Facts marked **[unverified]** were not confirmed in official docs while this was
 | D8 | No mainnet runs for now: all benchmarks run on PocketIC. The mainnet cost estimates in §5.7 are kept as reference only | 2026-11-13 |
 | D9 | 32-shard ladder target confirmed: global top-100 page p50 < 600 ms, p95 < 1.2 s | 2026-11-13 |
 | D10 | Scalable routing: range-compressed, versioned shard map cached by clients (lazy refresh, optional delta fetch); variable slot count (`slotBits`) over a 32-bit key hash, with zero-movement slot doubling; `slotBits` carried in every request and cursor; hot single partition keys handled by data modeling (salting) (§4.1, §4.2, §4.5) | 2026-11-13 |
+| D11 | Per-index write cost target restated as an absolute budget: ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard), ≤ 10% extra when index keys are unchanged, zero inter-canister calls. Replaces D6's < 20% per index, which M1 missed (~35–50% on PocketIC, dominated by the IC per-page memory charge). An index-tree memory-locality experiment in M3 may lower the budget (§5.7, §13, §14 Q1) | 2026-11-14 |
 
 ---
 
@@ -193,7 +194,8 @@ type ShardMap = {
   schemaVersion : Nat;
 };
 shardMap      : query () -> async ShardMap;
-shardMapSince : query (epoch : Nat64) -> async { #delta : { to : ShardMap; changed : [(Nat32, Nat16)] }; #full : ShardMap };
+type MapChange = { #double; #move : { start : Nat; end_ : Nat; shard : Nat16 }; #addShard : Principal };  // each bumps epoch by 1
+shardMapSince : query (epoch : Nat64) -> async { #delta : { from : Nat64; to : Nat64; changes : [MapChange] }; #full : ShardMap };
 // admin, controllers only:
 addWriter / removeWriter / setReaders;  addShard(subnet : ?Principal);  moveSlots(range, to);  doubleSlots();
 uploadShardWasm(chunk) / commitShardWasm(sha256);  upgradeShards(plan);  backfillIndex(id);  status()
@@ -434,7 +436,7 @@ All numbers below are **[proposed target]**, not measurements. Latency percentil
 | Global ordered top-100 page, 32 shards | < 600 ms | < 1.2 s | Ladder step 2 (D9) |
 | Global ordered top-100 page, 64 shards | — | ≤ 1.5 s | Ladder step 3 = full benchmark scale (D7). **Exceeding this triggers building the global index tier (M6 go/no-go)** |
 | Long sequential scan (`scan`/`ixScan` pages) | — | — | Pages up to ~1 MB per shard; ≥ 10k records/s per participating shard |
-| Write cost per secondary index | — | — | < 20% extra instructions per write per index; **zero** inter-canister calls. *M1 PocketIC measurement: not met for writes that change index keys (~35–50% per index), met when index keys are unchanged (≤ ~7%); §15, Q1 in §14* |
+| Write cost per secondary index | — | — | **D11:** ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard); ≤ 10% extra when index keys are unchanged; **zero** inter-canister calls. *Replaces the original < 20% per index (M1 measured ~35–50% for changed keys, §15). M3 locality experiment tries to lower it.* |
 | `write` latency | ~1–2 s | — | Update path ([canisters]); not a target, an IC property |
 
 **IC limits behind these targets (checked against [Resource limits][limits], 2026-11-13):**
@@ -683,8 +685,8 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 |---|---|---|
 | M0 ✅ | Repo skeleton (mops, moc pinned, PocketIC pinned). 32-bit slot hash with `slotBits`, and order-preserving encoders with cross-language vectors. Also: range-compressed shard map with doubling, shard-side route check, `Index`/`Shard` skeletons, 2-subnet PocketIC harness | Done 2026-11-13: `mops test` 26/26, TS unit 14/14, PocketIC 7/7 |
 | M1 ✅ | Single shard: Store on `core/Map`, write/get/scan/delete, CAS, dedupe, access control, **`Schema` and local indexes and `ixScan`** | Done 2026-11-13: `mops test` 45/45, TS unit 22/22, PocketIC 29/29 (incl. the D6 instruction bench) |
-| M2 | Index canister plus static multi-shard: range-compressed shard map, delta fetch, `route` checks, TS client routing, **global `query`/`topN` via k-way merge and cursor** | Multi-shard tests: global scan equals reference |
-| M3 | Cycles: create, top-up, status/metrics. **Benchmark harness, YCSB A–E and IX-1…3, synthetic data generator** | Baseline numbers recorded in `docs/BENCH.md` |
+| M2 ✅ | Index canister plus static multi-shard: range-compressed shard map, delta fetch, `route` checks, TS client routing, **global `query`/`topN` via k-way merge and cursor** | Done 2026-11-14: `mops test` 49/49, TS unit 30/30, PocketIC 42/42; 8-shard global scans over 3 indexes equal the reference |
+| M3 | Cycles: create, top-up, status/metrics. **Benchmark harness, YCSB A–E and IX-1…3, synthetic data generator**. Index-tree memory-locality experiment (D11) | Baseline numbers recorded in `docs/BENCH.md`, including instructions per changed index key before/after the locality experiment |
 | M4 | Split/move protocol with crash-resume (local index entries move with their rows), **slot doubling and oversized-slot split**, salting helpers (§4.5). **Index backfill/drop jobs** | Split-under-load test and scan-across-split test green |
 | M5 | Wasm store and rolling upgrade with snapshots, multi-subnet placement (PocketIC), **optional per-subnet composite-query gather** | Upgrade/rollback tests green, IX-1 re-run multi-subnet |
 | M6 | README, examples, demo (incl. the ad-auction example), v0.1.0 tag (local only, not published). **GSI decision gate:** go if the 64-shard global top-100 page p95 (the D7 benchmark scale) exceeds 1.5 s (D6), if the 16→32→64 ladder slope rules out larger deployments, or if the instruction-based targets fail | Review with the user |
@@ -694,14 +696,15 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 
 ## 14. Open questions
 
-The design is complete as of D1–D10. Questions found during implementation:
+The design is complete as of D1–D11. Questions found during implementation:
 
-- **Q1 (M1): D6 per-index write target.** On PocketIC, a single-op ~1 KB write costs ~3.9 M instructions with no index, and each index whose key changes adds ~1.2–1.8 M (~35–50% per index). That is over the < 20% target. Most of the cost is the IC's per-page memory charge (§15), not the algorithm. The options:
-  - (a) restate the target per *changed* index entry, in absolute instructions (≈ 1.5 M per changed index key at this scale);
-  - (b) keep 20% and attempt locality work in M3, for example inline fixed-size key prefixes in B-tree nodes, a larger node order, or a Region-backed index store;
-  - (c) count it against M6's "instruction-based targets fail" GSI trigger. The GSI does not help here, because it adds inter-canister calls per write.
+- **Q1 (M1), resolved 2026-11-14 as D11.** The < 20% per-index target was missed for writes that change index keys (~35–50% per index on PocketIC; cause is the IC per-page memory charge, §15). Decision: restate it as an absolute budget per changed index key (≈ 1.5 M instructions at the M1 scale), keep zero inter-canister calls, and run a **locality experiment in M3**: inline fixed-size key prefixes in B-tree nodes, a larger node order, or a Region-backed index store. M3 reports instructions per changed index key before and after, and lowers the D11 budget if the experiment wins.
+- **Q2 (M2): Motoko client for canister callers.** §3 lists a client API for TS *and* Motoko. M2 built only the TS client. A Motoko client would route keys and run global queries from another canister, through inter-canister calls (§5.4): update latency, cycles per call, and composite-query fan-out limited to the same subnet. Options:
+  - (a) add it in M5, together with the per-subnet composite-query gather it would naturally use;
+  - (b) add a minimal Motoko router (point ops and batches only, no global query) in M3;
+  - (c) leave it out of v1 and document TS as the only client.
 
-  Recommendation: (a) now, plus (b) as an M3 experiment.
+  Recommendation: (a).
 
 ## 15. Implementation notes
 
@@ -788,6 +791,74 @@ These are the numbers from the final `scripts/test-all.sh` run. Repeated runs va
 8. **`from_candid` traps on malformed Candid:** it returns null only on a type mismatch. The demo `decode` screens for the `DIDL` magic first, and any trap aborts the write.
 9. **inspect:** ingress `assign`/`setAccess` is accepted from the configured index principal, which lets the bench and operators drive a shard whose "index" is a user principal. Production indexes are canisters, so they never send ingress.
 10. **Controllers:** shard controllers are still whoever deployed the shard (the test admin). Making the index the shard controller arrives with M3 shard creation.
+
+### M2 (2026-11-14)
+
+**Built.**
+- **Index canister:**
+  - `shardMapSince(epoch)` returns `#delta { from; to; changes }` or `#full`. It is backed by `src/MapLog.mo`, a bounded log of the last 256 changes; a `registerShards` reset starts a new base.
+  - `doubleSlots`/`finishDoubling` implement the §4.1 zero-movement rollout:
+    - Step 1 pushes the doubled assignment, with `acceptPrevSlotBits`, to every shard.
+    - Step 2 publishes the map at epoch + 1 and logs `#double`.
+    - Step 3 (`finishDoubling`) withdraws `acceptPrevSlotBits`.
+    - A `doubleSlots` retry after a failed push resumes the same rollout.
+  - Assignment and allowlist pushes now go to all shards in parallel.
+  - `registerShards` is allowed once, because re-registering would move data without a migration.
+  - New `status` query.
+- **`src/ShardMap.mo` and `ts/src/shardMap.ts`:** `move(start, end, shard)` (canonical result), `apply`/`applyChange` for logged changes, `equal`, `activeShards`.
+- **`Routing.checkSlice`** also accepts the previous map (epoch − 1 with the old `slotBits`) while a doubling rollout runs. Ownership is identical, so a global page stays exact.
+- **TS `EkvmClient` (`ts/src/client.ts`):**
+  - Lazy map cache: the first fetch is full, then delta on `#wrongShard`, with bounded retries.
+  - Routed `put`/`delete`/`getOne`/`scan`/`scanAll`.
+  - Multi-key `get`: grouped by shard, run in parallel, results in input order.
+  - Cross-shard `batch`:
+    - sub-batches run in parallel and each is atomic on its shard only;
+    - the result is reported per op as `{ok: version} | {err}`;
+    - each sub-batch's request id is SHA-256(base id ‖ shard ‖ op indexes), so a retried call is deduplicated shard-side, and a recomposed sub-batch after a map change gets a fresh id.
+  - Global `query`/`queryAll`/`topN`: scatter-gather k-way merge with a stateless cursor (§5.3).
+    - A row is emitted only once no open shard can still return a smaller one. That keeps the page exact even when a shard stops early at its byte or instruction cap, in which case the client runs another round for just the shards that can still contribute.
+    - `perShard` sets rows per shard per round. The default is `limit`, normally one round. `"adaptive"` asks for ⌈2·limit/S⌉ (§5.3, c = 2).
+    - On `#wrongShard` the client refreshes and restarts the page from the same cursor position.
+
+**Tests (all local).**
+- `mops test`: 49, of which 4 are new. They cover `move` against slot-by-slot ownership, `apply`, the change log (empty delta, delta chain replay equal to the live map, full outside the window or after a reset, window cap), and the rollout slice check.
+- TS unit tests: 30, of which 8 are new.
+  - TS `move`/`applyChange`.
+  - Global merge against a fake 6–16-shard cluster that returns randomly short pages, in both directions, at limits 1/17/100, in exact, adaptive and perShard = 3 modes.
+  - topN.
+  - A `#wrongShard` mid-page and a doubling between pages, with the cursor still exact.
+  - Cursor index mismatch.
+- PocketIC: 42, of which 13 are new in `global.test.ts`. The setup is the index plus 8 `shard-ix3` shards over 2 subnets (4 + 4), loaded with 2,000 items through cross-shard batches. The new tests cover:
+  - re-registration and non-controller admin refused;
+  - every shard holding data, with the totals matching;
+  - multi-key `get` order;
+  - a cross-shard batch whose conflicting shard rolls back while the other shard applies;
+  - full paging (limit 37) over all 3 indexes equal to the global reference;
+  - a reverse value range with values;
+  - a tuple-prefix category query;
+  - topN(100) in exact and adaptive modes;
+  - an overwrite visible in the global order;
+  - a doubling rollout:
+    - stale point reads and `ixScan` keep working with no refresh during the rollout;
+    - the delta carries exactly one `#double`;
+    - after `finishDoubling` the stale client takes one `#wrongShard`, makes one delta fetch, and ends with a map equal to a fresh full fetch;
+    - the pre-doubling cursor resumes and the union equals the reference;
+    - `shardMapSince(0)` returns `#full`.
+
+**PocketIC measurement (not mainnet; wall-clock is local emulation, not IC latency):** topN(100) on `by_name`, 8 shards, 2,000 items.
+- Exact mode: 1 round, 8 calls, 800 rows fetched (8× overfetch), ~70–110 ms wall across runs.
+- Adaptive mode: 1 round, 8 calls, 200 rows fetched, ~55–80 ms wall.
+
+The values are recorded in `build/bench-m2.json`. Latency targets (D6/D9) can't be checked on PocketIC (D8); the M3 benchmark harness measures the 16/32/64 ladder.
+
+**Deviations from the design.**
+1. **The `shardMapSince` delta format** is a list of changes, `{ from; to; changes : [MapChange] }` with `#double | #move | #addShard`, replayed by the client. It replaces `{ to : ShardMap; changed : [(Nat32, Nat16)] }`, which carried the full map and could not express a doubling. Only `#double` is emitted in M2; the index emits `#move`/`#addShard` from M4/M3.
+2. **Doubling was implemented in M2**, map and rollout only. It's the only map change that moves no data, so delta fetch can be exercised end to end. Oversized-slot splits and moves remain M4.
+3. **Rollout acceptance for `ixScan`:** during a doubling, shards accept a route at `(epoch − 1, previous slotBits)` as well as the current one (see `Routing.checkSlice` above).
+4. **Shards are pushed the new assignment before the map is published**, as in §4.1. For the duration of a push, shards can differ in epoch; a client that sees `#wrongShard` from a shard that hasn't been updated yet simply refreshes and retries (bounded by `maxRetries`, default 3).
+5. **No Motoko client in M2.** The design lists a client API for "TS and Motoko"; only TS routing and merge are built. A Motoko client for canister callers (inter-canister fan-out, §5.4) is deferred and not yet assigned to a milestone (see Q2).
+6. **`registerShards` is once-only** (static multi-shard). Adding shards means a move with data migration (M4) or `#addShard` plus moves.
+7. **The adaptive factor c = 2 is fixed.** M3 decides the default mode, as §5.3 says.
 
 ---
 

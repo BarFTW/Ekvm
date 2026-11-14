@@ -25,13 +25,17 @@ module {
     if (owns(a, slot)) #ok(slot) else wrong;
   };
 
-  /// Route check for requests without a partition key (`ixScan`): the slot
-  /// count must be accepted and the epoch must equal the shard's assignment
-  /// epoch, so a page is never served from a stale slice (DESIGN.md §5.3).
+  /// Route check for requests without a partition key (`ixScan`). Accepted:
+  /// the shard's current (epoch, slotBits), or, during a doubling rollout,
+  /// the previous map (epoch - 1, previous slotBits): doubling changes no
+  /// ownership, so the slice is identical. Anything else is #wrongShard, so a
+  /// page is never served from a stale slice (DESIGN.md §5.3).
   public func checkSlice(a : T.Assignment, route : T.Route) : Result.Result<(), T.Err> {
-    let bitsOk = route.slotBits == a.slotBits or (
-      switch (a.acceptPrevSlotBits) { case (?p) p == route.slotBits; case null false }
-    );
-    if (bitsOk and route.epoch == a.epoch and a.owned.size() > 0) #ok else #err(#wrongShard { epoch = a.epoch; slotBits = a.slotBits });
+    let current = route.slotBits == a.slotBits and route.epoch == a.epoch;
+    let prev = switch (a.acceptPrevSlotBits) {
+      case (?p) p == route.slotBits and route.epoch + 1 == a.epoch;
+      case null false;
+    };
+    if ((current or prev) and a.owned.size() > 0) #ok else #err(#wrongShard { epoch = a.epoch; slotBits = a.slotBits });
   };
 };

@@ -4,6 +4,7 @@ import Nat8 "mo:core/Nat8";
 import Principal "mo:core/Principal";
 import { suite; test } "mo:test";
 import Hash "../src/Hash";
+import MapLog "../src/MapLog";
 import Routing "../src/Routing";
 import SM "../src/ShardMap";
 import T "../src/Types";
@@ -99,6 +100,93 @@ suite(
         assert Routing.check(after, { epoch = 7; slotBits = 16 }, pk) == #err(#wrongShard { epoch = 8; slotBits = 17 });
         assert Routing.check(during, { epoch = 7; slotBits = 16 }, pk) == #ok(Hash.slotOfKey(pk, 17));
         assert Routing.check(after, { epoch = 8; slotBits = 17 }, pk) == #ok(Hash.slotOfKey(pk, 17));
+      },
+    );
+  },
+);
+
+// ---------------------------------------------------------------- M2: moves, change log, rollout
+
+func ownerOfSlot(m : SM.ShardMap, s : Nat) : Nat16 = SM.shardIndexOfSlot(m, s.toNat32());
+
+suite(
+  "map changes and delta log",
+  func() {
+    test(
+      "move reassigns exactly the moved slots and stays canonical",
+      func() {
+        let m = SM.even(shards(4), 4, 1); // 16 slots, 4 per shard
+        let cases : [(Nat, Nat, Nat16)] = [(0, 1, 3), (3, 9, 0), (12, 16, 0), (0, 16, 2), (5, 6, 1), (4, 8, 1)];
+        for ((a, b, s) in cases.values()) {
+          let n = SM.move(m, a, b, s);
+          assert SM.validate(n) == #ok and n.epoch == 2;
+          assert SM.canonical(n).ranges == n.ranges;
+          for (slot in Nat.range(0, 16)) {
+            let expect = if (slot >= a and slot < b) s else ownerOfSlot(m, slot);
+            assert ownerOfSlot(n, slot) == expect;
+          };
+        };
+        // moving a range onto its owner only bumps the epoch
+        assert SM.move(m, 4, 8, 1).ranges == m.ranges;
+      },
+    );
+    test(
+      "apply: double, move, addShard",
+      func() {
+        let m = SM.even(shards(2), 3, 1);
+        let d = SM.apply(m, #double);
+        assert d.slotBits == 4 and d.epoch == 2;
+        let a = SM.apply(d, #addShard(Principal.fromText("aaaaa-aa")));
+        assert a.shards.size() == 3 and a.epoch == 3 and a.ranges == d.ranges;
+        let mv = SM.apply(a, #move { start = 0; end_ = 2; shard = 2 });
+        assert ownerOfSlot(mv, 0) == 2 and ownerOfSlot(mv, 2) == 0 and mv.epoch == 4;
+      },
+    );
+    test(
+      "since: empty delta, delta chain, full outside the window or after reset",
+      func() {
+        let log = MapLog.new();
+        var m = SM.even(shards(3), 8, 1);
+        MapLog.reset(log, 1);
+        let base = m;
+        assert MapLog.since(log, m, 1) == #delta { from = 1; to = 1; changes = [] };
+        let changes : [T.MapChange] = [#double, #move { start = 0; end_ = 10; shard = 2 }, #double];
+        for (c in changes.values()) {
+          m := SM.apply(m, c);
+          MapLog.record(log, m.epoch, c, 256);
+        };
+        switch (MapLog.since(log, m, 1)) {
+          case (#delta d) {
+            assert d.from == 1 and d.to == 4 and d.changes.size() == 3;
+            var r = base;
+            for (c in d.changes.values()) r := SM.apply(r, c);
+            assert SM.equal(r, m);
+          };
+          case (#full _) assert false;
+        };
+        assert MapLog.since(log, m, 0) == #full(m); // predates the reset
+        assert MapLog.since(log, m, 9) == #full(m); // from the future
+        // window cap: only the last 2 changes are kept
+        let small = MapLog.new();
+        MapLog.reset(small, 1);
+        var m2 = base;
+        for (c in changes.values()) { m2 := SM.apply(m2, c); MapLog.record(small, m2.epoch, c, 2) };
+        assert MapLog.since(small, m2, 1) == #full(m2);
+        switch (MapLog.since(small, m2, 2)) { case (#delta d) assert d.changes.size() == 2; case (#full _) assert false };
+      },
+    );
+    test(
+      "slice check accepts the previous map only during a doubling rollout",
+      func() {
+        let m = SM.even(shards(2), 8, 1);
+        let d = SM.double(m);
+        let during = SM.assignment(d, 0, ?8);
+        let after = SM.assignment(d, 0, null);
+        assert Routing.checkSlice(during, { epoch = 2; slotBits = 9 }) == #ok;
+        assert Routing.checkSlice(during, { epoch = 1; slotBits = 8 }) == #ok;
+        assert Routing.checkSlice(during, { epoch = 0; slotBits = 8 }) != #ok;
+        assert Routing.checkSlice(after, { epoch = 1; slotBits = 8 }) == #err(#wrongShard { epoch = 2; slotBits = 9 });
+        assert Routing.checkSlice(after, { epoch = 2; slotBits = 9 }) == #ok;
       },
     );
   },

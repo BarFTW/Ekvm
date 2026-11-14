@@ -57,8 +57,22 @@ export const shardIdl: IDL.InterfaceFactory = () =>
   });
 export const shardInit = (index: unknown) => IDL.encode([IDL.Record({ index: IDL.Principal })], [{ index }]);
 
+const MapChange = IDL.Variant({
+  double: IDL.Null,
+  move: IDL.Record({ start: IDL.Nat, end: IDL.Nat, shard: IDL.Nat16 }),
+  addShard: IDL.Principal,
+});
+const MapSince = IDL.Variant({
+  delta: IDL.Record({ from: IDL.Nat64, to: IDL.Nat64, changes: IDL.Vec(MapChange) }),
+  full: ShardMapT,
+});
+
 export const indexIdl: IDL.InterfaceFactory = () =>
   IDL.Service({
+    shardMapSince: IDL.Func([IDL.Nat64], [MapSince], ["query"]),
+    doubleSlots: IDL.Func([], [ShardMapT], []),
+    finishDoubling: IDL.Func([], [], []),
+    status: IDL.Func([], [IDL.Record({ epoch: IDL.Nat64, slotBits: IDL.Nat8, shards: IDL.Nat, ranges: IDL.Nat, doubling: IDL.Bool, logSize: IDL.Nat })], ["query"]),
     registerShards: IDL.Func([IDL.Vec(IDL.Principal), IDL.Nat8], [], []),
     shardMap: IDL.Func([], [ShardMapT], ["query"]),
     addWriter: IDL.Func([IDL.Principal], [], []),

@@ -2,11 +2,17 @@
 
 Ekvm is a sharded key-value database library for the Internet Computer, written in Motoko with a TypeScript client. It supports user-defined secondary indexes and global ordered scans. The design is in [docs/DESIGN.md](docs/DESIGN.md) and the key-encoding spec in [docs/ENCODING.md](docs/ENCODING.md).
 
-**Status:** milestones **M0** (scaffolding) and **M1** (single shard) are done.
+**Status:** milestones **M0–M2** are done.
 - M0: order-preserving encoders (Motoko + TS, shared vectors), 32-bit key hash and slots, range-compressed shard map with doubling, shard-side route checks, PocketIC harness on two subnets.
-- M1: shard data operations (`write` batches with CAS and dedupe, `get`, `getCertainly`, partition `scan` with cursors and a 1 MiB page cap), writer/reader allowlists pushed by the index, and **local secondary indexes declared in Motoko** (`Schema`), maintained atomically on write and served by `ixScan`. TS `ShardClient` with opaque cursors.
+- M1: shard data operations (`write` batches with CAS and dedupe, `get`, `getCertainly`, partition `scan` with cursors and a 1 MiB page cap), writer/reader allowlists pushed by the index, and **local secondary indexes declared in Motoko** (`Schema`), maintained atomically on write and served by `ixScan`.
+- M2: multi-shard TS `EkvmClient`: lazily refreshed shard map (delta fetch via `shardMapSince`), key routing, cross-shard `get`/`batch`, and the **global ordered `query`/`topN`** (scatter-gather k-way merge, stateless cursor). Zero-movement slot doubling (`doubleSlots`/`finishDoubling`).
 
-Multi-shard client routing and the global ordered `query` arrive in M2.
+```ts
+const client = new EkvmClient({ index: indexActor, shard: (id) => makeShardActor(id) });
+await client.batch(ops);                                         // split by shard, atomic per shard
+const { rows, cursor } = await client.query(1, { limit: 100 });  // global order over index 1
+const next = await client.query(1, { limit: 100, cursor });
+```
 
 ### Declaring indexes
 

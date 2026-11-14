@@ -58,3 +58,44 @@ export const double = <P>(m: ShardMap<P>): ShardMap<P> => {
 
 /** Wire route attached to every shard request. */
 export const route = (m: ShardMap<unknown>) => ({ epoch: m.epoch, slotBits: m.slotBits });
+
+/** Merge adjacent ranges with the same owner. */
+export const canonical = <P>(m: ShardMap<P>): ShardMap<P> => {
+  const out: Range[] = [];
+  for (const r of m.ranges) if (out.length === 0 || out[out.length - 1]![1] !== r[1]) out.push(r);
+  return { ...m, ranges: out };
+};
+
+/** Reassign slots [start, end) to shard table entry `shard`; epoch+1, canonical (same as ShardMap.move). */
+export const move = <P>(m: ShardMap<P>, start: number, end: number, shard: number): ShardMap<P> => {
+  const total = slotCount(m.slotBits);
+  if (!(start < end && end <= total && shard < m.shards.length)) throw new RangeError("invalid move");
+  const out: Range[] = [];
+  const push = (r: Range) => {
+    if (out.length && out[out.length - 1]![0] === r[0]) out.pop();
+    out.push(r);
+  };
+  let placed = false;
+  m.ranges.forEach(([a, s], i) => {
+    const b = i + 1 < m.ranges.length ? m.ranges[i + 1]![0] : total;
+    if (a < start) push([a, s]);
+    if (!placed && b > start) { push([start, shard]); placed = true; }
+    if (b > end) push([Math.max(a, end), s]);
+  });
+  return canonical({ ...m, epoch: m.epoch + 1n, ranges: out });
+};
+
+/** A logged map change, as returned by `shardMapSince` (Candid variant shape). */
+export type MapChange<P = string> =
+  | { double: null }
+  | { move: { start: bigint; end: bigint; shard: number } }
+  | { addShard: P };
+
+export const applyChange = <P>(m: ShardMap<P>, c: MapChange<P>): ShardMap<P> => {
+  if ("double" in c) return double(m);
+  if ("move" in c) return move(m, Number(c.move.start), Number(c.move.end), c.move.shard);
+  return { ...m, epoch: m.epoch + 1n, shards: [...m.shards, c.addShard] };
+};
+
+/** Distinct shards that own at least one range. */
+export const activeShards = <P>(m: ShardMap<P>): P[] => [...new Set(m.ranges.map(([, s]) => s))].sort((a, b) => a - b).map((i) => m.shards[i]!);

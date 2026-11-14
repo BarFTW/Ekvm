@@ -113,4 +113,45 @@ module {
     };
     null;
   };
+
+  /// Reassign slots [start, end_) to shard table entry `shard`; bumps epoch.
+  /// Result is canonical (adjacent same-owner ranges merged).
+  public func move(m : ShardMap, start : Nat, end_ : Nat, shard : Nat16) : ShardMap {
+    let total = slotCount(m.slotBits);
+    assert start < end_ and end_ <= total and shard.toNat() < m.shards.size();
+    let out = List.empty<(Nat32, Nat16)>();
+    let n = m.ranges.size();
+    var placed = false;
+    for (i in Nat.range(0, n)) {
+      let (f, s) = m.ranges[i];
+      let a = f.toNat();
+      let b = if (i + 1 < n) m.ranges[i + 1].0.toNat() else total;
+      // part of [a, b) before start
+      if (a < start) out.add((f, s));
+      if (not placed and b > start) { out.add((start.toNat32(), shard)); placed := true };
+      // part of [a, b) at or after end_
+      if (b > end_) { out.add((Nat.max(a, end_).toNat32(), s)) };
+    };
+    // Keep only the first entry per start slot (a range split at `start` may add duplicates).
+    let dedup = List.empty<(Nat32, Nat16)>();
+    for (r in out.values()) {
+      switch (dedup.last()) { case (?(f, _)) { if (f == r.0) { ignore dedup.removeLast() } }; case null {} };
+      dedup.add(r);
+    };
+    canonical({ m with epoch = m.epoch + 1; ranges = dedup.toArray() });
+  };
+
+  /// Apply one logged change (DESIGN.md §4.2 delta fetch).
+  public func apply(m : ShardMap, c : T.MapChange) : ShardMap {
+    switch c {
+      case (#double) double(m);
+      case (#move { start; end_; shard }) move(m, start, end_, shard);
+      case (#addShard p) { { m with epoch = m.epoch + 1; shards = m.shards.concat([p]) } };
+    };
+  };
+
+  /// Equality of content (epoch, slotBits, shard table, ranges).
+  public func equal(a : ShardMap, b : ShardMap) : Bool {
+    a.epoch == b.epoch and a.slotBits == b.slotBits and a.shards == b.shards and a.ranges == b.ranges and a.schemaVersion == b.schemaVersion;
+  };
 };

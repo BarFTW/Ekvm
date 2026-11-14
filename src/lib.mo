@@ -1,6 +1,7 @@
 /// Ekvm v2: public library surface.
 import Encode "Encode";
 import Hash "Hash";
+import MapLog "MapLog";
 import Routing "Routing";
 import Schema "Schema";
 import ShardMap "ShardMap";
@@ -12,6 +13,7 @@ module {
   public let hash = Hash;
   public let routing = Routing;
   public let shardMap = ShardMap;
+  public let mapLog = MapLog;
   public let store = Store;
   public let schema = Schema;
   public type Key = Types.Key;
@@ -25,6 +27,8 @@ module {
   public type Err = Types.Err;
   public type ShardMap = Types.ShardMap;
   public type Assignment = Types.Assignment;
+  public type MapChange = Types.MapChange;
+  public type MapSince = Types.MapSince;
   public type Access = Types.Access;
   public type IndexDef<V> = Schema.IndexDef<V>;
   public type Schema<V> = Schema.Schema<V>;

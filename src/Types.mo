@@ -66,6 +66,23 @@ module {
     schemaVersion : Nat;
   };
 
+  /// One shard-map change, as logged by the index for delta fetches
+  /// (DESIGN.md §4.2). Each change bumps the epoch by one.
+  public type MapChange = {
+    /// slotBits + 1, every range start doubles (zero data movement).
+    #double;
+    /// Slots [start, end_) now belong to shard table entry `shard`.
+    #move : { start : Nat; end_ : Nat; shard : Nat16 };
+    /// Append a principal to the shard table (owns nothing yet).
+    #addShard : Principal;
+  };
+
+  public type MapSince = {
+    /// Apply `changes` in order to a map at epoch `from` to reach epoch `to`.
+    #delta : { from : Nat64; to : Nat64; changes : [MapChange] };
+    #full : ShardMap;
+  };
+
   /// What the index pushes to one shard: its owned slot ranges as [start, end) in slot space.
   public type Assignment = {
     epoch : Nat64;

@@ -145,7 +145,7 @@ actor class Shard(init : { index : Principal }) {
     Routing.check(assignment, route, pk);
   };
 
-  public query func version() : async Text { "ekvm-shard/0.1.0 (M1)" };
+  public query func version() : async Text { "ekvm-shard/0.2.0 (M2)" };
 
   public query func status() : async { index : Principal; assignment : T.Assignment; accessVersion : Nat64 } {
     { index; assignment; accessVersion = access.version };
