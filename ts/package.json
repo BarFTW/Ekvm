@@ -1,0 +1,28 @@
+{
+  "name": "@ekvm/client",
+  "version": "0.1.0",
+  "description": "Ekvm v2 TypeScript client: key encodings, key hash, shard-map routing, single-shard client",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "test:pic": "node --test integration/*.test.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0"
+  },
+  "devDependencies": {
+    "@dfinity/pic": "^0.25.0",
+    "@icp-sdk/core": "^6.1.1",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@icp-sdk/core": "^6.1.1"
+  }
+}
