@@ -35,10 +35,12 @@ const ShardMapT = IDL.Record({
   ranges: IDL.Vec(IDL.Tuple(IDL.Nat32, IDL.Nat16)), schemaVersion: IDL.Nat,
 });
 const IndexInfo = IDL.Record({ id: IDL.Nat16, name: IDL.Text, ready: IDL.Bool, entries: IDL.Nat });
+const Layout = IDL.Variant({ btree: IDL.Null, prefix: IDL.Null });
 const Stats = IDL.Record({
   entries: IDL.Nat, bytes: IDL.Nat, lastVersion: IDL.Nat64, schemaVersion: IDL.Nat, schemaLog: IDL.Vec(IDL.Text),
   indexes: IDL.Vec(IndexInfo), dedupeSize: IDL.Nat, writeCalls: IDL.Nat, writeOps: IDL.Nat,
   writeInstructions: IDL.Nat, lastWriteInstructions: IDL.Nat64, storeInstructions: IDL.Nat,
+  ixLayout: Layout, heapBytes: IDL.Nat, maxLiveBytes: IDL.Nat, memoryBytes: IDL.Nat, cycles: IDL.Nat,
 });
 
 export const shardIdl: IDL.InterfaceFactory = () =>
@@ -53,9 +55,11 @@ export const shardIdl: IDL.InterfaceFactory = () =>
     routeCheck: IDL.Func([Route, Bytes], [Res(IDL.Nat32)], ["query"]),
     status: IDL.Func([], [IDL.Record({ index: IDL.Principal, assignment: Assignment, accessVersion: IDL.Nat64 })], ["query"]),
     stats: IDL.Func([], [Stats], ["query"]),
+    explain: IDL.Func([IDL.Variant({ get: GetReq, scan: ScanReq, ixScan: IxScanReq })],
+      [IDL.Record({ instructions: IDL.Nat64, rows: IDL.Nat, bytes: IDL.Nat, ok: IDL.Bool })], ["query"]),
     version: IDL.Func([], [IDL.Text], ["query"]),
   });
-export const shardInit = (index: unknown) => IDL.encode([IDL.Record({ index: IDL.Principal })], [{ index }]);
+export const shardInit = (index: unknown, layout?: "btree" | "prefix") => IDL.encode([IDL.Record({ index: IDL.Principal, ixLayout: IDL.Opt(IDL.Variant({ btree: IDL.Null, prefix: IDL.Null })) })], [{ index, ixLayout: layout ? [{ [layout]: null }] : [] }]);
 
 const MapChange = IDL.Variant({
   double: IDL.Null,
@@ -67,12 +71,28 @@ const MapSince = IDL.Variant({
   full: ShardMapT,
 });
 
+const CyclesPolicy = IDL.Record({
+  intervalNs: IDL.Nat, minBalance: IDL.Nat, burnDays: IDL.Nat, topUpFactor: IDL.Nat, indexReserve: IDL.Nat, lowRunwayDays: IDL.Nat,
+});
+const ShardCycles = IDL.Record({
+  shard: IDL.Principal, cycles: IDL.Nat, memorySize: IDL.Nat, idleBurnPerDay: IDL.Nat, reservedCycles: IDL.Nat,
+  checkedAt: IDL.Int, topUps: IDL.Nat, toppedUp: IDL.Nat, lastError: IDL.Opt(IDL.Text),
+});
+
 export const indexIdl: IDL.InterfaceFactory = () =>
   IDL.Service({
     shardMapSince: IDL.Func([IDL.Nat64], [MapSince], ["query"]),
     doubleSlots: IDL.Func([], [ShardMapT], []),
     finishDoubling: IDL.Func([], [], []),
-    status: IDL.Func([], [IDL.Record({ epoch: IDL.Nat64, slotBits: IDL.Nat8, shards: IDL.Nat, ranges: IDL.Nat, doubling: IDL.Bool, logSize: IDL.Nat })], ["query"]),
+    status: IDL.Func([], [IDL.Record({
+      epoch: IDL.Nat64, slotBits: IDL.Nat8, shards: IDL.Nat, ranges: IDL.Nat, doubling: IDL.Bool, logSize: IDL.Nat,
+      cycles: IDL.Nat, runwayDays: IDL.Opt(IDL.Nat), lowCycles: IDL.Bool,
+    })], ["query"]),
+    createShards: IDL.Func([IDL.Nat, IDL.Nat8, IDL.Record({ cyclesPerShard: IDL.Nat, ixLayout: IDL.Opt(Layout) })], [IDL.Vec(IDL.Principal)], []),
+    setCyclesPolicy: IDL.Func([CyclesPolicy], [], []),
+    cyclesPolicy: IDL.Func([], [CyclesPolicy], ["query"]),
+    checkCyclesNow: IDL.Func([], [IDL.Vec(ShardCycles)], []),
+    shardCycleStatus: IDL.Func([], [IDL.Record({ checks: IDL.Nat, shards: IDL.Vec(ShardCycles) })], ["query"]),
     registerShards: IDL.Func([IDL.Vec(IDL.Principal), IDL.Nat8], [], []),
     shardMap: IDL.Func([], [ShardMapT], ["query"]),
     addWriter: IDL.Func([IDL.Principal], [], []),

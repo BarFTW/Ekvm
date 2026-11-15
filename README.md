@@ -2,10 +2,11 @@
 
 Ekvm is a sharded key-value database library for the Internet Computer, written in Motoko with a TypeScript client. It supports user-defined secondary indexes and global ordered scans. The design is in [docs/DESIGN.md](docs/DESIGN.md) and the key-encoding spec in [docs/ENCODING.md](docs/ENCODING.md).
 
-**Status:** milestones **M0–M2** are done.
+**Status:** milestones **M0–M3** are done.
 - M0: order-preserving encoders (Motoko + TS, shared vectors), 32-bit key hash and slots, range-compressed shard map with doubling, shard-side route checks, PocketIC harness on two subnets.
 - M1: shard data operations (`write` batches with CAS and dedupe, `get`, `getCertainly`, partition `scan` with cursors and a 1 MiB page cap), writer/reader allowlists pushed by the index, and **local secondary indexes declared in Motoko** (`Schema`), maintained atomically on write and served by `ixScan`.
 - M2: multi-shard TS `EkvmClient`: lazily refreshed shard map (delta fetch via `shardMapSince`), key routing, cross-shard `get`/`batch`, and the **global ordered `query`/`topN`** (scatter-gather k-way merge, stateless cursor). Zero-movement slot doubling (`doubleSlots`/`finishDoubling`).
+- M3: the index creates its shards (`createShards`) and keeps them funded (timer-driven top-up from `canister_status`, `status().lowCycles`), exercised on PocketIC only; benchmark harness (`ts/bench/`: seeded generator, YCSB A–E, IX-1…3; baseline in [docs/BENCH.md](docs/BENCH.md)); index trees moved to `IxTree`, a B+tree with inline key prefixes (D11 locality experiment).
 
 ```ts
 const client = new EkvmClient({ index: indexActor, shard: (id) => makeShardActor(id) });
@@ -41,13 +42,13 @@ See `test/schemas/Demo.mo` for a complete example (it screens non-Candid values 
 ## Layout
 
 ```
-src/            Motoko library (Encode, Hash, ShardMap, Routing, Types, Schema, Store)
+src/            Motoko library (Encode, Hash, ShardMap, Routing, Types, Schema, Store, IxTree, MapLog)
 canisters/      Index.mo, Shard.mo (actor classes; Shard imports mo:ekvm-schema/Schema)
 schemas/empty/  default shard schema (no indexes)
 test/           Motoko unit tests (mops test), generated vectors, test/schemas (demo + 0..3-index bench schemas)
 tools/          gen_vectors.py: independent Python reference + vector generator
-ts/             TypeScript client (src/), unit tests (test/), PocketIC integration (integration/)
-scripts/        build.sh, test-all.sh
+ts/             TypeScript client (src/), unit tests (test/), PocketIC integration (integration/), benchmark harness (bench/)
+scripts/        build.sh, test-all.sh, bench.sh
 ```
 
 ## Running locally (no network, no cycles)
@@ -55,6 +56,7 @@ scripts/        build.sh, test-all.sh
 ```
 npm i -g ic-mops && mops install && (cd ts && npm install)
 scripts/test-all.sh
+scripts/bench.sh baseline     # ~1 h on an 8-core box; writes build/bench-m3-baseline.{json,md}
 ```
 
 Toolchains are pinned in `mops.toml`: moc, pocket-ic and wasmtime. Nothing here deploys to mainnet.

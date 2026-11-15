@@ -1,6 +1,6 @@
 # Ekvm v2: Design
 
-Status: design complete (D1–D11) · rev 4 · 2026-11-14 · implementation: M0–M2 done · License: Apache-2.0 (same as v1)
+Status: design complete (D1–D12) · rev 5 · 2026-11-15 · implementation: M0–M3 done · License: Apache-2.0 (same as v1)
 
 Ekvm ("Elastic Key-Value Map") is a **general-purpose** Motoko database library for the Internet Computer: a key-value store spread across many canisters, with user-defined secondary indexes and global ordered scans. This document covers a rewrite. The v1 code (`BarFTW/Ekvm`, 2024) is a reference for the idea only. No v1 code is reused.
 
@@ -23,6 +23,7 @@ Facts marked **[unverified]** were not confirmed in official docs while this was
 | D9 | 32-shard ladder target confirmed: global top-100 page p50 < 600 ms, p95 < 1.2 s | 2026-11-13 |
 | D10 | Scalable routing: range-compressed, versioned shard map cached by clients (lazy refresh, optional delta fetch); variable slot count (`slotBits`) over a 32-bit key hash, with zero-movement slot doubling; `slotBits` carried in every request and cursor; hot single partition keys handled by data modeling (salting) (§4.1, §4.2, §4.5) | 2026-11-13 |
 | D11 | Per-index write cost target restated as an absolute budget: ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard), ≤ 10% extra when index keys are unchanged, zero inter-canister calls. Replaces D6's < 20% per index, which M1 missed (~35–50% on PocketIC, dominated by the IC per-page memory charge). An index-tree memory-locality experiment in M3 may lower the budget (§5.7, §13, §14 Q1) | 2026-11-14 |
+| D12 | The Motoko client (for canister callers: key routing, batches, global `query`/`topN` via inter-canister fan-out, §5.4) is built in **M5**, together with the per-subnet composite-query gather canister it uses. Until M5 the TypeScript client is the only client (§3, §13, §14 Q2) | 2026-11-15 |
 
 ---
 
@@ -174,6 +175,8 @@ ixScan  : query ({ route : Route; index : Nat16; from : Bound; to : Bound; after
 - Index-only shard methods (M1): `assign(Assignment)` and `setAccess({ version; writers; readers = #public | #allow [Principal] })`.
 
 ### Client API (TS and Motoko)
+
+The TypeScript client (`ts/`) is the only client until M5. The Motoko client for canister callers arrives in M5 with the per-subnet gather canister (D12).
 
 ```ts
 put / get / delete / batch(ops)
@@ -436,7 +439,7 @@ All numbers below are **[proposed target]**, not measurements. Latency percentil
 | Global ordered top-100 page, 32 shards | < 600 ms | < 1.2 s | Ladder step 2 (D9) |
 | Global ordered top-100 page, 64 shards | — | ≤ 1.5 s | Ladder step 3 = full benchmark scale (D7). **Exceeding this triggers building the global index tier (M6 go/no-go)** |
 | Long sequential scan (`scan`/`ixScan` pages) | — | — | Pages up to ~1 MB per shard; ≥ 10k records/s per participating shard |
-| Write cost per secondary index | — | — | **D11:** ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard); ≤ 10% extra when index keys are unchanged; **zero** inter-canister calls. *Replaces the original < 20% per index (M1 measured ~35–50% for changed keys, §15). M3 locality experiment tries to lower it.* |
+| Write cost per secondary index | — | — | **D11:** ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard); ≤ 10% extra when index keys are unchanged; **zero** inter-canister calls. *Replaces the original < 20% per index (M1 measured ~35–50% for changed keys, §15).* **M3 (PocketIC):** with the `IxTree` layout, 1.02–1.33 M per changed key by the D11 method (down from 1.55–1.86 M), but 2.0 M on random keys over a 20k-record shard (IX-2; 3.3 M before). The budget is kept pending §14 Q3 (`docs/BENCH.md`). |
 | `write` latency | ~1–2 s | — | Update path ([canisters]); not a target, an IC property |
 
 **IC limits behind these targets (checked against [Resource limits][limits], 2026-11-13):**
@@ -565,6 +568,7 @@ On the fiduciary subnet, multiply by ×2.6. Use the `ic0.cost_*` APIs instead of
   - Another subnet: the management canister creates on the caller's subnet ([forum][subnetq]), so this goes through the CMC `create_canister` with `subnet_selection`. **[unverified: CMC call shape from a canister]** ([subnet selection][subsel])
 - **Top-up:** a timer in the index (default every 10 min) reads each shard's `canister_status` (cycles, `idle_cycles_burned_per_day`, memory). It sends `deposit_cycles` when a shard's balance drops below `max(7 × daily burn, 1 T)`.
 - **Freezing threshold** is left at the default of 30 days.
+- **Implemented in M3 (exercised on PocketIC only):** same-subnet creation (`createShards`, actor-class instantiation from the index), the top-up timer, per-shard status and `lowCycles`. Cross-subnet creation via the CMC moves to M5 (§15 M3).
 - **Index funding** is the operator's job. The index exposes its own projected runway, and `status()` raises a `lowCycles` flag well before shards would freeze.
 - **Reserved cycles:** on subnets above 750 GiB, memory growth reserves cycles. Monitoring includes `reserved_cycles`, and subnet choice should avoid full subnets.
 
@@ -673,6 +677,8 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 
 **Scale and pass criteria:** the D7 dataset (100 M × ~1 KB records, 3 indexes, 1,000 writes/s aggregate, 64 shards on 4 PocketIC subnets) and the targets in §5.7, run as a ladder at 16, 32 and 64 shards with constant per-shard data. Smaller scales (1 M, 10 M records) run first in CI. Whether PocketIC on one box can hold ~150 GiB of state across 64 canisters is **[unverified]**. If it can't, the ladder uses the same per-shard size on fewer shards per run, and the full 64-shard run uses a reduced per-shard size (results labelled accordingly). Instruction-based targets (index write overhead, rows per page, records/s per shard derived from instructions) can be checked locally.
 
+**Harness (M3):** `ts/bench/` (`scripts/bench.sh smoke|baseline`). The M3 baseline in `docs/BENCH.md` ran at ≤ 120k records and ≤ 32 shards on one subnet. The D7-scale ladder above is still to be run.
+
 **Not measurable locally:** real network latency and boundary-node behaviour. Latency targets stay **[proposed target]**: no mainnet run is planned (D8).
 
 **Demo:** a small TS script (and optional web page) that loads a synthetic dataset, declares two indexes, and shows point gets, a single-partition scan, and a paginated global top-N.
@@ -686,9 +692,9 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 | M0 ✅ | Repo skeleton (mops, moc pinned, PocketIC pinned). 32-bit slot hash with `slotBits`, and order-preserving encoders with cross-language vectors. Also: range-compressed shard map with doubling, shard-side route check, `Index`/`Shard` skeletons, 2-subnet PocketIC harness | Done 2026-11-13: `mops test` 26/26, TS unit 14/14, PocketIC 7/7 |
 | M1 ✅ | Single shard: Store on `core/Map`, write/get/scan/delete, CAS, dedupe, access control, **`Schema` and local indexes and `ixScan`** | Done 2026-11-13: `mops test` 45/45, TS unit 22/22, PocketIC 29/29 (incl. the D6 instruction bench) |
 | M2 ✅ | Index canister plus static multi-shard: range-compressed shard map, delta fetch, `route` checks, TS client routing, **global `query`/`topN` via k-way merge and cursor** | Done 2026-11-14: `mops test` 49/49, TS unit 30/30, PocketIC 42/42; 8-shard global scans over 3 indexes equal the reference |
-| M3 | Cycles: create, top-up, status/metrics. **Benchmark harness, YCSB A–E and IX-1…3, synthetic data generator**. Index-tree memory-locality experiment (D11) | Baseline numbers recorded in `docs/BENCH.md`, including instructions per changed index key before/after the locality experiment |
+| M3 ✅ | Cycles: create, top-up, status/metrics. **Benchmark harness, YCSB A–E and IX-1…3, synthetic data generator**. Index-tree memory-locality experiment (D11) | Done 2026-11-15: `mops test` 70/70, TS unit 33/33, PocketIC 52/52; baseline in `docs/BENCH.md` (PocketIC, ≤ 120k records, ≤ 32 shards, one subnet); `IxTree` cuts instructions per changed index key by 29–40% and is the default layout; D11 budget kept (§14 Q3) |
 | M4 | Split/move protocol with crash-resume (local index entries move with their rows), **slot doubling and oversized-slot split**, salting helpers (§4.5). **Index backfill/drop jobs** | Split-under-load test and scan-across-split test green |
-| M5 | Wasm store and rolling upgrade with snapshots, multi-subnet placement (PocketIC), **optional per-subnet composite-query gather** | Upgrade/rollback tests green, IX-1 re-run multi-subnet |
+| M5 | Wasm store and rolling upgrade with snapshots, multi-subnet placement (PocketIC), **optional per-subnet composite-query gather**, **Motoko client** for canister callers (routing, batches, global `query`/`topN` through the gather canister; D12) | Upgrade/rollback tests green, IX-1 re-run multi-subnet, Motoko-client global queries equal the reference on PocketIC |
 | M6 | README, examples, demo (incl. the ad-auction example), v0.1.0 tag (local only, not published). **GSI decision gate:** go if the 64-shard global top-100 page p95 (the D7 benchmark scale) exceeds 1.5 s (D6), if the 16→32→64 ladder slope rules out larger deployments, or if the instruction-based targets fail | Review with the user |
 | M7 | *(conditional on M6)* GSI tier: range-partitioned index shards, outbox propagation, lag metric, fallback to scatter-gather | Lag-bounded consistency tests green |
 
@@ -696,15 +702,28 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 
 ## 14. Open questions
 
-The design is complete as of D1–D11. Questions found during implementation:
+The design is complete as of D1–D12. Questions found during implementation:
 
 - **Q1 (M1), resolved 2026-11-14 as D11.** The < 20% per-index target was missed for writes that change index keys (~35–50% per index on PocketIC; cause is the IC per-page memory charge, §15). Decision: restate it as an absolute budget per changed index key (≈ 1.5 M instructions at the M1 scale), keep zero inter-canister calls, and run a **locality experiment in M3**: inline fixed-size key prefixes in B-tree nodes, a larger node order, or a Region-backed index store. M3 reports instructions per changed index key before and after, and lowers the D11 budget if the experiment wins.
-- **Q2 (M2): Motoko client for canister callers.** §3 lists a client API for TS *and* Motoko. M2 built only the TS client. A Motoko client would route keys and run global queries from another canister, through inter-canister calls (§5.4): update latency, cycles per call, and composite-query fan-out limited to the same subnet. Options:
+- **Q2 (M2), resolved 2026-11-15 as D12: option (a), build the Motoko client in M5.** §3 lists a client API for TS *and* Motoko. M2 built only the TS client. A Motoko client would route keys and run global queries from another canister, through inter-canister calls (§5.4): update latency, cycles per call, and composite-query fan-out limited to the same subnet. Options:
   - (a) add it in M5, together with the per-subnet composite-query gather it would naturally use;
   - (b) add a minimal Motoko router (point ops and batches only, no global query) in M3;
   - (c) leave it out of v1 and document TS as the only client.
 
-  Recommendation: (a).
+  Recommendation was (a); the user chose (a).
+- **Q3 (M3): which method should the D11 budget be measured with?** D11 is defined on single-op writes at 20k records per shard. Its benchmark (`bench.test.ts`) touches recently inserted keys, which sit close together in memory. On that method `IxTree` measures 1.02–1.33 M instructions per changed key, under the 1.5 M budget. The harness's IX-2 updates Zipf-random keys across the whole shard, and there the same code costs ~2.0 M per changed key (the old tree: 3.3 M). Options:
+  - (a) keep D11 at ~1.5 M on the current method and track IX-2 as information;
+  - (b) re-base D11 on IX-2 at ~2.0–2.2 M per changed key;
+  - (c) keep 1.5 M as the target on IX-2. That would need more locality work, e.g. storing the row version in the index entry, or a Region-backed index store.
+
+  The budget was **not** lowered in M3, pending this answer. Recommendation: (b), with (c)'s ideas left as later optimizations.
+- **Q4 (M3): default fan-out mode for global queries.** §5.3 left exact vs adaptive to M3. At 2,000 records per shard, adaptive (⌈2·limit/S⌉ rows per shard) fetched 2–2.4× the rows returned, against S× for exact. Total read instructions per top-100 page came out 27% lower at S = 4 and ~4× lower at S = 32. But at S = 32 every query needed a second round for 2 shards, and at S = 1 adaptive costs more. On the IC a second round adds one query round trip of latency, which PocketIC cannot measure. Options:
+  - (a) keep exact as the default (current);
+  - (b) adaptive when S ≥ 4;
+  - (c) always adaptive.
+
+  Recommendation: (b), revisited after the multi-subnet IX-1 in M5.
+- **Q5 (M3): `ixScan` per-row cost.** A 100-row index page costs ~0.3 M instructions per row, probably mostly the primary lookup that fetches each row's version. Storing the version in the index entry would avoid that lookup when `withValues = false`. The price is a larger index and an index update on every write, even when the key is unchanged. Should this go into M4?
 
 ## 15. Implementation notes
 
@@ -856,9 +875,71 @@ The values are recorded in `build/bench-m2.json`. Latency targets (D6/D9) can't 
 2. **Doubling was implemented in M2**, map and rollout only. It's the only map change that moves no data, so delta fetch can be exercised end to end. Oversized-slot splits and moves remain M4.
 3. **Rollout acceptance for `ixScan`:** during a doubling, shards accept a route at `(epoch − 1, previous slotBits)` as well as the current one (see `Routing.checkSlice` above).
 4. **Shards are pushed the new assignment before the map is published**, as in §4.1. For the duration of a push, shards can differ in epoch; a client that sees `#wrongShard` from a shard that hasn't been updated yet simply refreshes and retries (bounded by `maxRetries`, default 3).
-5. **No Motoko client in M2.** The design lists a client API for "TS and Motoko"; only TS routing and merge are built. A Motoko client for canister callers (inter-canister fan-out, §5.4) is deferred and not yet assigned to a milestone (see Q2).
+5. **No Motoko client in M2.** The design lists a client API for "TS and Motoko"; only TS routing and merge are built. A Motoko client for canister callers (inter-canister fan-out, §5.4) is deferred; D12 assigns it to M5 (Q2).
 6. **`registerShards` is once-only** (static multi-shard). Adding shards means a move with data migration (M4) or `#addShard` plus moves.
 7. **The adaptive factor c = 2 is fixed.** M3 decides the default mode, as §5.3 says.
+
+### M3 (2026-11-15)
+
+**Built.**
+- **D12** recorded (Motoko client in M5; TS-only client until then).
+- **Shard creation (§8), exercised on PocketIC only:**
+  - `Index.createShards(n, slotBits, { cyclesPerShard; ixLayout })` instantiates the `Shard` actor class from inside the index, on the index's own subnet. The cycles are attached and include the creation fee.
+  - It checks the index balance first, creates in concurrent waves of 10, records each shard as it lands (a retry resumes), then registers the shards like `registerShards`.
+  - The index wasm embeds the shard wasm, so both are built against one schema package (`build/index-ix3.wasm` for the demo schema).
+- **Cycles (§8):**
+  - A recurring timer (default every 10 min; re-armed on install and upgrade) reads each shard's `canister_status` in parallel. A shard below `max(burnDays × idle burn per day, minBalance)` gets `deposit_cycles` up to `topUpFactor ×` that threshold.
+  - A top-up is never allowed to take the index below `indexReserve`. Failures are recorded per shard.
+  - `setCyclesPolicy`, `cyclesPolicy`, `checkCyclesNow`, `shardCycleStatus`.
+  - `status()` adds `cycles`, `runwayDays` (balance above reserve ÷ total shard idle burn) and `lowCycles`.
+- **Shard metrics:** `stats()` adds `ixLayout`, `heapBytes`, `maxLiveBytes`, `memoryBytes`, `cycles`. A new `explain` query runs a `get`/`scan`/`ixScan` like the real query and returns its instruction count, rows and bytes (benchmark instrumentation, subject to the reader allowlist).
+- **`src/IxTree.mo`:** a B+tree (order 64) for index positions, with two inline arrays of 56-bit scalar key prefixes per node (D11 locality experiment). `Store` supports both layouts (`#btree` = core `Map`, `#prefix` = `IxTree`), chosen per shard by the init field `ixLayout`. The default is `#prefix`.
+- **Benchmark harness (`ts/bench/`):**
+  - `gen.ts`: SplitMix64 PRNG, the YCSB Zipfian and scrambled-Zipfian generators, ~1 KB `Item` records, key schemes for YCSB A–C/D/E.
+  - `harness.ts`: YCSB A–E and IX-1…3, metric collection via a counting actor proxy, `explain`, shard stats and PocketIC cycle balances.
+  - `run.ts` / `scripts/bench.sh [smoke|baseline]`.
+  - The baseline is in `docs/BENCH.md`.
+
+**Tests (all local).**
+- `mops test`: 70.
+  - 2 new `IxTree` tests: prefix monotonicity against `compare` on 9,000 random pairs, including 0x00/0xFF escape cases; random add/remove/iteration against `core` `Map` at orders 4, 5, 8 and 64, so internal-node splits are exercised.
+  - Every `Store` suite now runs on both layouts (+19).
+- TS unit: 33, of which 3 are new generator tests.
+- PocketIC: 52 (M2 had 42; +5 `cycles.test.ts`, +1 `harness.test.ts`, +4 from `bench.test.ts` running both layouts).
+  - `cycles.test.ts`, 5 tests:
+    - `createShards` rejects non-controllers, refuses before creating when the balance is too low, creates and registers the shards, and refuses a second call;
+    - created shards report the index, the demo schema and the `#prefix` layout;
+    - the data path works through them;
+    - `checkCyclesNow` tops up shards below 1 T to ~2 T and leaves them alone afterwards;
+    - the timer fires after simulated time;
+    - a starving index records errors instead of overdrawing and raises `lowCycles`;
+    - policy validation and controller checks.
+  - `harness.test.ts`: the whole suite at smoke scale with its correctness checks (reads find their rows, scans have the expected length, global pages equal a reference, tie pages complete and in order).
+  - `bench.test.ts` now runs both layouts (8 shard runs).
+
+**PocketIC measurements:** see `docs/BENCH.md` for the full table and the scale (≤ 120,000 records, ≤ 32 shards, one subnet). Headline numbers:
+- ~2.1 M instructions per point-read call;
+- ~4.2 M instructions and ~17.4 M cycles per single-op ~1 KB update with unchanged index keys;
+- ~1.05 M instructions and ~4.5 M cycles per record for batched loads;
+- ~2.6 KB maximum live heap per ~1 KB record with 3 indexes;
+- ~30 M instructions per 100-row `ixScan` page;
+- shard creation fee observed at 502.1 B cycles.
+
+**Locality experiment (D11):**
+- Instructions per changed index key went from 1.55–1.86 M to 1.02–1.33 M by the D11 method (−29…−36%), and from 3.34 M to 1.99 M on random keys (IX-2, −40%).
+- Regressions: batched inserts +20% per index key; unchanged-key updates +5–8% per index instead of ~0–2%. Memory is about the same (+3%).
+- `IxTree` became the default. The D11 budget was not lowered (§14 Q3).
+
+**Deviations from the design.**
+1. **Shard wasm source:** the shard code is embedded in the index (actor-class import) instead of coming from a wasm store. The store and rolling upgrades remain M5. One consequence: the index and its shards share one schema build.
+2. **Created shards have the index as their only controller** (the actor-class default). That fits §9 (the index orchestrates upgrades), but until M5 operators can't upgrade or snapshot shards directly.
+3. **Creation is same-subnet only.** Cross-subnet placement through the CMC (§8, unverified call shape) moves to M5 with multi-subnet placement. On PocketIC the 32-shard IX-1 step therefore runs on one subnet.
+4. **Top-up threshold uses idle burn only**, as `canister_status` reports it. Instruction-driven burn shows up only as a falling balance between checks. The amount is `topUpFactor × threshold − balance` (default factor 2), not a fixed sum.
+5. **Index layout:** `IxTree` deletes without rebalancing. Empty or underfull leaves stay linked and are refilled by later inserts in their range, so index memory follows the index's high-water mark. `#btree` remains selectable per shard. The layout is internal to `Store`: its public interface (`write`, `get`, `scan`, `ixScan`, `syncSchema`) did not change, so the storage direction can still change after the separate cost-model analysis (Regions vs heap vs hybrid vs global index) without touching callers. M3 made no further heap-specific investment.
+6. **Benchmark scale:** about 0.1% of D7, on one subnet. There is no 16/32/64 ladder at D7 per-shard size, no latency, and no derived ops/s ceilings (§12 asks for them, but they need per-round instruction and thread limits that are not verified). IX-1 runs a 1…32 ladder at 2,000 records per shard.
+7. **Exact vs adaptive default not changed** (§5.3 said M3 decides). The data is in `docs/BENCH.md`; the decision is §14 Q4.
+8. **D11 budget kept**, not lowered (see above and §14 Q3).
+9. **Tests:** `data.test.ts` now spaces its three back-to-back shard upgrades by 10 simulated minutes. The replica rate-limits `install_code` by instructions spent in recent installs, and the larger M3 heap hit that limit.
 
 ---
 

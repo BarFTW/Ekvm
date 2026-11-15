@@ -1,7 +1,9 @@
 /// Ekvm shard canister (M1): single-shard data operations, local secondary
 /// indexes, access control, dedupe. The schema is chosen at build time via the
 /// moc package `ekvm-schema` (DESIGN.md §3, D4); see scripts/build.sh.
+import Prim "mo:⛔";
 import Array "mo:core/Array";
+import Cycles "mo:core/Cycles";
 import IC "mo:core/InternetComputer";
 import Iter "mo:core/Iter";
 import Map "mo:core/Map";
@@ -18,13 +20,13 @@ import S "../src/Schema";
 import Store "../src/Store";
 import T "../src/Types";
 
-actor class Shard(init : { index : Principal }) {
+actor class Shard(init : { index : Principal; ixLayout : ?Store.Layout }) {
   let index : Principal = init.index;
   var assignment : T.Assignment = { epoch = 0; slotBits = 16; acceptPrevSlotBits = null; owned = [] };
   var access : T.Access = { version = 0; writers = []; readers = #public_ };
   var writers : Map.Map<Principal, ()> = Map.empty();
   var readers : ?Map.Map<Principal, ()> = null; // null = public
-  let store : Store.State = Store.new();
+  let store : Store.State = Store.newWithLayout(switch (init.ixLayout) { case (?l) l; case null Store.defaultLayout });
 
   // Metrics (DESIGN.md §12): instruction counts are this message's own counter at reply time.
   var writeCalls : Nat = 0;
@@ -141,11 +143,56 @@ actor class Shard(init : { index : Principal }) {
 
   // ------------------------------------------------------------ introspection
 
+  public type ExplainReq = { #get : T.GetReq; #scan : T.ScanReq; #ixScan : T.IxScanReq };
+  /// Cost of one read, measured inside this query (benchmarks, DESIGN.md §12).
+  public type Explain = { instructions : Nat64; rows : Nat; bytes : Nat; ok : Bool };
+
+  /// Runs the read like the real query and reports its instruction count
+  /// (the counter at the end of the work, before reply encoding).
+  public shared query ({ caller }) func explain(req : ExplainReq) : async Explain {
+    func entryBytes(e : T.Entry) : Nat = e.key.pk.size() + e.key.sk.size() + e.value.size();
+    let (ok, rows, bytes) : (Bool, Nat, Nat) = switch req {
+      case (#get g) {
+        switch (doGet(caller, g)) {
+          case (#ok es) { var b = 0; var n = 0; for (e in es.values()) switch e { case (?x) { b += entryBytes(x); n += 1 }; case null {} }; (true, n, b) };
+          case (#err _) (false, 0, 0);
+        };
+      };
+      case (#scan r) {
+        if (not canRead(caller)) (false, 0, 0) else switch (Routing.check(assignment, r.route, r.pk)) {
+          case (#err _) (false, 0, 0);
+          case (#ok _) {
+            let p = Store.scan(store, r.pk, r.from, r.to, r.limit, r.reverse, limits, overBudget);
+            var b = 0;
+            for (e in p.entries.values()) b += entryBytes(e);
+            (true, p.entries.size(), b);
+          };
+        };
+      };
+      case (#ixScan r) {
+        if (not canRead(caller)) (false, 0, 0) else switch (Routing.checkSlice(assignment, r.route)) {
+          case (#err _) (false, 0, 0);
+          case (#ok) {
+            switch (Store.ixScan(store, r, limits, overBudget)) {
+              case (#ok p) {
+                var b = 0;
+                for (x in p.rows.values()) b += x.ixKey.size() + x.key.pk.size() + x.key.sk.size() + (switch (x.value) { case (?v) v.size(); case null 0 });
+                (true, p.rows.size(), b);
+              };
+              case (#err _) (false, 0, 0);
+            };
+          };
+        };
+      };
+    };
+    { instructions = IC.performanceCounter(0); rows; bytes; ok };
+  };
+
   public query func routeCheck(route : T.Route, pk : Blob) : async Result.Result<Nat32, T.Err> {
     Routing.check(assignment, route, pk);
   };
 
-  public query func version() : async Text { "ekvm-shard/0.2.0 (M2)" };
+  public query func version() : async Text { "ekvm-shard/0.3.0 (M3)" };
 
   public query func status() : async { index : Principal; assignment : T.Assignment; accessVersion : Nat64 } {
     { index; assignment; accessVersion = access.version };
@@ -165,6 +212,13 @@ actor class Shard(init : { index : Principal }) {
     writeInstructions : Nat;
     lastWriteInstructions : Nat64;
     storeInstructions : Nat;
+    ixLayout : Store.Layout;
+    /// Wasm heap in use / total memory / cycles balance (DESIGN.md §8, §12).
+    heapBytes : Nat;
+    /// Largest live heap seen at the end of a GC cycle (lags the current size).
+    maxLiveBytes : Nat;
+    memoryBytes : Nat;
+    cycles : Nat;
   };
 
   public query func stats() : async Stats {
@@ -183,6 +237,11 @@ actor class Shard(init : { index : Principal }) {
       writeInstructions;
       lastWriteInstructions;
       storeInstructions;
+      ixLayout = store.layout;
+      heapBytes = Prim.rts_heap_size();
+      maxLiveBytes = Prim.rts_max_live_size();
+      memoryBytes = Prim.rts_memory_size();
+      cycles = Cycles.balance();
     };
   };
 
@@ -199,6 +258,7 @@ actor class Shard(init : { index : Principal }) {
     #version : Any;
     #status : Any;
     #stats : Any;
+    #explain : Any;
   } }) : Bool {
     switch msg {
       // The index is a canister, so these normally never arrive as ingress; a

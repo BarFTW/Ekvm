@@ -20,6 +20,7 @@ import Nat64 "mo:core/Nat64";
 import Order "mo:core/Order";
 import Queue "mo:core/Queue";
 import Encode "Encode";
+import IxTree "IxTree";
 import Schema "Schema";
 import T "Types";
 
@@ -36,12 +37,31 @@ module {
   /// write but not served until a backfill (M4) marks it `#ready`.
   public type IndexStatus = { #ready; #building };
 
+  /// Index tree layout (D11 locality experiment, DESIGN.md §15 M3).
+  /// `#btree`: core `Map<IxPos, ()>` (M1/M2). `#prefix`: `IxTree`, a B+tree
+  /// with inline scalar key prefixes.
+  public type Layout = { #btree; #prefix };
+
+  public type IxMap = { #btree : Map.Map<T.IxPos, ()>; #prefix : IxTree.Tree };
+
   public type Index = {
     id : Nat16;
     var name : Text;
     var status : IndexStatus;
-    map : Map.Map<T.IxPos, ()>;
+    map : IxMap;
   };
+
+  public let defaultLayout : Layout = #prefix;
+
+  func newIxMap(l : Layout) : IxMap = switch l { case (#btree) #btree(Map.empty<T.IxPos, ()>()); case (#prefix) #prefix(IxTree.empty()) };
+
+  public func ixSize(m : IxMap) : Nat = switch m { case (#btree b) b.size(); case (#prefix t) IxTree.size(t) };
+
+  public func ixContains(m : IxMap, p : T.IxPos) : Bool = switch m { case (#btree b) b.containsKey(compareIxPos, p); case (#prefix t) IxTree.contains(t, p) };
+
+  func ixAdd(m : IxMap, p : T.IxPos) = switch m { case (#btree b) b.add(compareIxPos, p, ()); case (#prefix t) ignore IxTree.add(t, p) };
+
+  func ixRemove(m : IxMap, p : T.IxPos) = switch m { case (#btree b) b.remove(compareIxPos, p); case (#prefix t) ignore IxTree.remove(t, p) };
 
   public type DedupeRec = { at : Int; result : T.WriteResult };
 
@@ -54,6 +74,8 @@ module {
     /// Approximate payload bytes: keys + values + index keys.
     var bytes : Nat;
     var schemaVersion : Nat;
+    /// Layout for indexes created from now on (existing ones keep theirs).
+    var layout : Layout;
   };
 
   public type Limits = {
@@ -83,7 +105,9 @@ module {
     maxDedupe = 100_000;
   };
 
-  public func new() : State {
+  public func new() : State = newWithLayout(defaultLayout);
+
+  public func newWithLayout(layout : Layout) : State {
     {
       primary = Map.empty<T.Key, Stored>();
       indexes = Map.empty<Nat16, Index>();
@@ -92,6 +116,7 @@ module {
       var lastVersion = 0;
       var bytes = 0;
       var schemaVersion = 0;
+      var layout;
     };
   };
 
@@ -139,7 +164,7 @@ module {
       switch (st.indexes.get(d.id)) {
         case (?ix) { ix.name := d.name };
         case null {
-          st.indexes.add(d.id, { id = d.id; var name = d.name; var status = if empty #ready else #building; map = Map.empty<T.IxPos, ()>() });
+          st.indexes.add(d.id, { id = d.id; var name = d.name; var status = if empty #ready else #building; map = newIxMap(st.layout) });
           log.add("added index " # d.id.toText() # " " # d.name # (if empty "" else " (building)"));
         };
       };
@@ -158,7 +183,7 @@ module {
   };
 
   public func indexStatus(st : State) : [(Nat16, Text, IndexStatus, Nat)] {
-    st.indexes.values().map<Index, (Nat16, Text, IndexStatus, Nat)>(func ix = (ix.id, ix.name, ix.status, ix.map.size())).toArray();
+    st.indexes.values().map<Index, (Nat16, Text, IndexStatus, Nat)>(func ix = (ix.id, ix.name, ix.status, ixSize(ix.map))).toArray();
   };
 
   public func setIndexReady(st : State, id : Nat16) : Bool {
@@ -245,6 +270,46 @@ module {
             };
           };
           r;
+        };
+      };
+    };
+  };
+
+  /// `range` over an IxTree (same bound semantics).
+  func treeRange(t : IxTree.Tree, lo : ?T.IxPos, hi : ?T.IxPos, reverse : Bool) : { next : () -> ?(T.IxPos, ()) } {
+    var done = false;
+    if (not reverse) {
+      let it = IxTree.entriesFrom(t, lo);
+      {
+        next = func() : ?(T.IxPos, ()) {
+          if (done) return null;
+          switch (it.next()) {
+            case (?k) {
+              switch hi { case (?h) { if (compareIxPos(k, h) != #less) { done := true; return null } }; case null {} };
+              ?(k, ());
+            };
+            case null { done := true; null };
+          };
+        };
+      };
+    } else {
+      let it = IxTree.reverseFrom(t, hi);
+      {
+        next = func() : ?(T.IxPos, ()) {
+          if (done) return null;
+          label l loop {
+            switch (it.next()) {
+              case (?k) {
+                let isHi = switch hi { case (?h) compareIxPos(k, h) == #equal; case null false };
+                if (not isHi) {
+                  switch lo { case (?l) { if (compareIxPos(k, l) == #less) { done := true; return null } }; case null {} };
+                  return ?(k, ());
+                };
+              };
+              case null { done := true; return null };
+            };
+          };
+          null;
         };
       };
     };
@@ -338,7 +403,10 @@ module {
       case null {};
     };
     let max = if (req.limit == 0 or req.limit > limits.maxRows) limits.maxRows else req.limit;
-    let it = range(ix.map, compareIxPos, lo, hi, req.reverse);
+    let it = switch (ix.map) {
+      case (#btree m) range(m, compareIxPos, lo, hi, req.reverse);
+      case (#prefix t) treeRange(t, lo, hi, req.reverse);
+    };
     let out = List.empty<T.IxRow>();
     var bytes = 0;
     loop {
@@ -449,12 +517,12 @@ module {
     let newIx = switch next { case (?n) n.ix; case null [] };
     for ((id, k) in oldIx.values()) {
       if (ixOf(newIx, id) != ?k) {
-        switch (st.indexes.get(id)) { case (?ix) ix.map.remove(compareIxPos, { ixKey = k; key }); case null {} };
+        switch (st.indexes.get(id)) { case (?ix) ixRemove(ix.map, { ixKey = k; key }); case null {} };
       };
     };
     for ((id, k) in newIx.values()) {
       if (ixOf(oldIx, id) != ?k) {
-        switch (st.indexes.get(id)) { case (?ix) ix.map.add(compareIxPos, { ixKey = k; key }, ()); case null {} };
+        switch (st.indexes.get(id)) { case (?ix) ixAdd(ix.map, { ixKey = k; key }); case null {} };
       };
     };
     switch old { case (?o) st.bytes -= Nat.min(st.bytes, storedBytes(o)); case null {} };
