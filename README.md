@@ -7,6 +7,7 @@ Ekvm is a sharded key-value database library for the Internet Computer, written 
 - M1: shard data operations (`write` batches with CAS and dedupe, `get`, `getCertainly`, partition `scan` with cursors and a 1 MiB page cap), writer/reader allowlists pushed by the index, and **local secondary indexes declared in Motoko** (`Schema`), maintained atomically on write and served by `ixScan`.
 - M2: multi-shard TS `EkvmClient`: lazily refreshed shard map (delta fetch via `shardMapSince`), key routing, cross-shard `get`/`batch`, and the **global ordered `query`/`topN`** (scatter-gather k-way merge, stateless cursor). Zero-movement slot doubling (`doubleSlots`/`finishDoubling`).
 - M3: the index creates its shards (`createShards`) and keeps them funded (timer-driven top-up from `canister_status`, `status().lowCycles`), exercised on PocketIC only; benchmark harness (`ts/bench/`: seeded generator, YCSB A–E, IX-1…3; baseline in [docs/BENCH.md](docs/BENCH.md)); index trees moved to `IxTree`, a B+tree with inline key prefixes (D11 locality experiment).
+- Next (planned, not built): a per-table configurable Store with our own stable-memory (Region) B-tree as the default backend, heap as a backend for small deployments, and client-side write batching (D13–D15; milestones M4–M10 in [docs/DESIGN.md](docs/DESIGN.md) §13).
 
 ```ts
 const client = new EkvmClient({ index: indexActor, shard: (id) => makeShardActor(id) });

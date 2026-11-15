@@ -1,10 +1,10 @@
 # Ekvm v2: Design
 
-Status: design complete (D1–D12) · rev 5 · 2026-11-15 · implementation: M0–M3 done · License: Apache-2.0 (same as v1)
+Status: design complete (D1–D15) · rev 6 · 2026-11-15 · implementation: M0–M3 done; M4+ re-planned for the Region-default Store (§13) · License: Apache-2.0 (same as v1)
 
 Ekvm ("Elastic Key-Value Map") is a **general-purpose** Motoko database library for the Internet Computer: a key-value store spread across many canisters, with user-defined secondary indexes and global ordered scans. This document covers a rewrite. The v1 code (`BarFTW/Ekvm`, 2024) is a reference for the idea only. No v1 code is reused.
 
-Facts marked **[unverified]** were not confirmed in official docs while this was written. They must be checked before we depend on them. Numbers marked **[proposed target]** are design goals pending measurement, not measurements.
+Facts marked **[unverified]** were not confirmed in official docs while this was written. They must be checked before we depend on them. Numbers marked **[proposed target]** are design goals pending measurement, not measurements. Numbers marked **[estimate]** come from the cost model (`/workspace/ekvm-costmodel`, its results page, and PocketIC micro-benchmarks), not from a full Ekvm measurement.
 
 ---
 
@@ -17,13 +17,16 @@ Facts marked **[unverified]** were not confirmed in official docs while this was
 | D3 | Ekvm v2 is a generic library, not tied to any application. Validated by a synthetic benchmark suite (YCSB-like mixes, range and index scans), with ad auctions as at most one example workload (§12) | 2026-11-13 |
 | D4 | Secondary indexes are declared in Motoko code (`Schema` compiled into the shard wasm). Adding an index = rolling shard upgrade + backfill (§3, §4.4). Runtime-declared indexes are out of scope | 2026-11-13 |
 | D5 | Read-committed global scans are acceptable for v1: an entry whose index value changes between pages may appear twice or be skipped (§5.6). Snapshot scans are out of scope | 2026-11-13 |
-| D6 | Performance targets as in §5.7, **proposed targets pending measurement**. The 64-shard global-page p95 is the M6 go/no-go threshold for the global index tier | 2026-11-13 |
-| D7 | Benchmark uses YCSB-standard ~1 KB records: 100 M records, 3 secondary indexes, on **~50+ shards** (planned: 64) across multiple subnets (§5.7, §12). Supersedes D6's 16-shard benchmark scale | 2026-11-13 |
+| D6 | Performance targets as in §5.7, **proposed targets pending measurement**. The 64-shard global-page p95 is the M6 go/no-go threshold for the global index tier. *Under D14 the GSI gate is the page-rate-vs-S formula (§5.2) at M9; p95 stays a secondary criterion* | 2026-11-13 |
+| D7 | Benchmark uses YCSB-standard ~1 KB records: 100 M records, 3 secondary indexes, on **~50+ shards** (planned: 64) across multiple subnets (§5.7, §12). Supersedes D6's 16-shard benchmark scale. *Shard counts revised 2026-11-15 under D14: ~4–8 Region shards [estimate]; the 64-shard plan was a heap-store artefact (§5.7)* | 2026-11-13 |
 | D8 | No mainnet runs for now: all benchmarks run on PocketIC. The mainnet cost estimates in §5.7 are kept as reference only | 2026-11-13 |
 | D9 | 32-shard ladder target confirmed: global top-100 page p50 < 600 ms, p95 < 1.2 s | 2026-11-13 |
 | D10 | Scalable routing: range-compressed, versioned shard map cached by clients (lazy refresh, optional delta fetch); variable slot count (`slotBits`) over a 32-bit key hash, with zero-movement slot doubling; `slotBits` carried in every request and cursor; hot single partition keys handled by data modeling (salting) (§4.1, §4.2, §4.5) | 2026-11-13 |
-| D11 | Per-index write cost target restated as an absolute budget: ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard), ≤ 10% extra when index keys are unchanged, zero inter-canister calls. Replaces D6's < 20% per index, which M1 missed (~35–50% on PocketIC, dominated by the IC per-page memory charge). An index-tree memory-locality experiment in M3 may lower the budget (§5.7, §13, §14 Q1) | 2026-11-14 |
-| D12 | The Motoko client (for canister callers: key routing, batches, global `query`/`topN` via inter-canister fan-out, §5.4) is built in **M5**, together with the per-subnet composite-query gather canister it uses. Until M5 the TypeScript client is the only client (§3, §13, §14 Q2) | 2026-11-15 |
+| D11 | Per-index write cost target restated as an absolute budget: ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard), ≤ 10% extra when index keys are unchanged, zero inter-canister calls. Replaces D6's < 20% per index, which M1 missed (~35–50% on PocketIC, dominated by the IC per-page memory charge). An index-tree memory-locality experiment in M3 may lower the budget (§5.7, §13, §14 Q1) *Re-scoped 2026-11-15 (§14 Q3): budgets per backend on the IX-2 method, as one term of cycles per logical write (D13)* | 2026-11-14 |
+| D12 | The Motoko client (for canister callers: key routing, batches, global `query`/`topN` via inter-canister fan-out, §5.4) is built in **M5**, together with the per-subnet composite-query gather canister it uses. Until M5 the TypeScript client is the only client (§3, §13, §14 Q2). *After the D14 re-plan this is M8, and the gather canister is conditional (§14 Q6)* | 2026-11-15 |
+| D13 | **Target use case and optimization direction.** Read-heavy, index-ordered listings and rankings (catalogs, marketplaces, explorers, leaderboards) at 1–500 GiB, plus batched ingest for indexers. Optimize for **cycles per logical write** and **shard count**. Non-goals: high-rate unbatched OLTP, aggregations/joins, snapshot scans, blobs > 1 MiB, cross-shard transactions (§2). Based on the cost model: queries are free, and message fees dominate writes, so batching and few shards matter more than the engine | 2026-11-15 |
+| D14 | **Configurable Store, Region default.** The storage backend is chosen per table at compile time, in the schema package like D4 indexes. Backends: **Region** (stable-memory B-tree; the **default** for primary data), **Heap** (EOP; for small deployments), **Hybrid** (heap keys and indexes, values in a Region log; for large values). Indexes stay local to the shard. A GSI tier is opt-in per index and gated by the page-rate-vs-S formula (§5.2, §13). Supersedes §6's "EOP heap only" and changes D7's shard counts (§5.7) | 2026-11-15 |
+| D15 | **Own Region B-tree.** We write our own stable-memory B-tree (page format, free space, overflow values, Region-backed indexes) instead of adopting `memory-collection`. The cost model's Region numbers came from `memory-collection` 0.4.0 and are a reference, not a dependency (§6) | 2026-11-15 |
 
 ---
 
@@ -75,6 +78,8 @@ Unbounded size comes for free once the design scales out.
 
 ## 2. Goals / non-goals
 
+**Target use case (D13):** read-heavy, index-ordered listings and rankings (catalog, marketplace, explorer, leaderboard) at 1–500 GiB, and batched ingest for indexers. The optimization targets are cycles per logical write and the number of shards.
+
 **Goals**
 1. Horizontal write and read throughput: add shards, including on other subnets, without downtime.
 2. One network hop per point operation. The index canister is never consulted per request.
@@ -86,11 +91,13 @@ Unbounded size comes for free once the design scales out.
 
 **Non-goals (v1 of the rewrite)**
 - Cross-shard transactions.
+- High-rate unbatched OLTP: the design assumes writes arrive in batches (client-side batching, §4.2); single unbatched writes work but are not optimized (D13).
+- Values (blobs) larger than 1 MiB.
 - Globally unique secondary indexes (uniqueness can only be enforced per shard).
 - Snapshot-isolated global scans (§5.6, D5).
 - Runtime-declared secondary indexes (D4).
 - Certified (subnet-signed) query responses (D2, §10).
-- A query language, joins, or aggregation beyond ordered scans.
+- A query language, joins, or aggregations beyond ordered scans.
 - Mainnet deployment or cycle purchasing tooling.
 
 ---
@@ -176,7 +183,7 @@ ixScan  : query ({ route : Route; index : Nat16; from : Bound; to : Bound; after
 
 ### Client API (TS and Motoko)
 
-The TypeScript client (`ts/`) is the only client until M5. The Motoko client for canister callers arrives in M5 with the per-subnet gather canister (D12).
+The TypeScript client (`ts/`) is the only client until the Motoko client milestone (D12; M8 in the re-planned §13).
 
 ```ts
 put / get / delete / batch(ops)
@@ -184,7 +191,10 @@ scan(pk, range, opts)                       // single shard
 query(index, range, { limit, reverse, cursor, withValues })   // global ordered scan, §5
   → { rows, cursor | null }
 topN(index, n, { reverse }) = query(index, unbounded, { limit: n, ... })
+writer({ maxOps, maxBytes, maxDelayMs }) → { put, delete, flush, close }   // client-side batching, §4.2
 ```
+
+**Tables (D14).** A table is a namespace of keys with its own schema (value decoder, indexes) and its own storage backend, all fixed at compile time in the schema package. A shard holds every table; routing hashes `pk` only, so rows with the same `pk` in different tables stay on one shard. API calls take a table id (default table 0, so the current single-keyspace API is table 0).
 
 ### Index-canister API
 
@@ -271,13 +281,19 @@ flowchart LR
 
   Because the shard recomputes the slot itself, a client with an old map gets `#wrongShard` rather than being misrouted, even after a doubling.
 - The index is never on the hot path. If the index is down, data traffic continues on cached maps.
+- **Client-side batching (D13).** Message fees dominate write cost: on a 13-node subnet each update message costs ~6.2 M cycles in base and ingress fees before any payload [docs], so a 1 KB write costs ~10–12 M cycles alone but ~4.3–5.9 M in a batch of 20 [estimate, cost model]. The TS client gets a `writer` that buffers `put`/`delete`, groups them per shard by the cached map, and flushes a shard's buffer when it reaches `maxOps` (default 100), `maxBytes` (default 1.5 MiB, under the 2 MiB ingress limit) or `maxDelayMs` (default 100 ms).
+  - Each op gets its own promise, resolved with its version or error from the per-shard batch result.
+  - Ops on the same key keep their order (same shard, same buffer, in order).
+  - A flush is one `write` message per shard with a fresh request id, so retries are deduplicated (§10). Flushes are atomic per shard only; ops from unrelated callers can share a flush, so a CAS failure is reported per op and never rolls back other callers' ops (the shard-side batch is all-or-nothing, so the writer sends conditional ops in their own messages or retries the unconditional rest; exact policy settled in M4).
+  - `#wrongShard` re-groups the affected ops after a map refresh. `flush()` and `close()` drain the buffers.
+  - Indexers (batched ingest) use the same path with larger `maxOps`.
 - Composite queries are **same-subnet and ingress-only** ([Canisters][canisters]). They therefore can't be the general fan-out mechanism. Cross-shard reads are fanned out by the client in parallel (§5.4).
 
 ### 4.3 Split / move protocol
 
 The index runs the protocol. Each step is persisted before every `await`, so a crash or trap resumes from a timer.
 
-1. **Trigger.** A shard exceeds a configured write rate or memory threshold (default: heap > 2 GiB), or the operator calls `moveSlots`. The index creates the target shard if needed.
+1. **Trigger.** A shard exceeds a configured write rate or size threshold, or the operator calls `moveSlots`. Size defaults depend on the backend (§6): Heap, heap > 2 GiB; Region and Hybrid, stable size above a soft cap (default 32 GiB **[proposed default]**). With the Region default, splits are driven mostly by write rate and are expected to be rare. The index creates the target shard if needed.
    - The index picks R from per-slot size and write-rate stats that each shard reports.
    - If the shard's load sits in one slot, the index first runs `doubleSlots` (§4.1), repeating until that slot is split, then moves one of the children.
 2. **Copy.** The source shard marks range R as `migrating → T` and starts a per-range change log. The index pulls snapshot pages from the source and pushes them to T with batched `write` calls. During this phase the source still serves reads and writes for R. T rebuilds local index entries as it ingests, using the same `extract`.
@@ -355,8 +371,13 @@ All entries of one `pk` live in one slot, so on one shard. Routing can't split t
   - Queries cost no cycles and run on any of the subnet's replicas.
   - Updates are the scarce resource: 4 threads per subnet, ~1–2 s, and they cost cycles.
   - A GSI turns every index change into 1–2 extra updates on other canisters, competing for exactly that resource.
-- **(b) degrades with S.** Every page touches every shard, so tail latency is the slowest of S, and read cost scales with S×N. Somewhere between "tens" and "hundreds" of shards this stops meeting targets. **The crossover point is unknown and is the main thing the M3/M5 benchmarks must establish.**
-- **So:** v1 implements (b) for every index. The API and cursor format are designed so that (a) can be added per index later (`IndexDef.global = true`) without changing client code. Implementing (a) is a decision gate at M6, based on numbers.
+- **(b) degrades with S.** Every page touches every shard, so tail latency is the slowest of S, and read cost scales with S×N. The crossover is expressed by the gate formula below; D14 keeps S small, which pushes it out.
+- **So:** v1 implements (b) for every index. The API and cursor format are designed so that (a) can be added per index later (`IndexDef.global = true`) without changing client code. Implementing (a) is a decision gate (§13 M9) based on the page-rate-vs-S formula below.
+- **GSI gate (D14), cost model formula (6) [estimate]:** scatter-gather is enough while the expected peak global page rate satisfies
+
+  `P_pages ≤ U · n_subnets · Q_cap / I_page(S)`, with `I_page(S) ≈ 55 M + 6.6 M · S` instructions (adaptive) or `≈ 34 M · S` (exact),
+
+  where `U ≈ 0.25` is the share of a subnet's query capacity Ekvm may use, and `Q_cap ≈ 1e11` query instructions per second per subnet **[unverified]**. A GSI page costs ~35 M instructions but adds ~2.9 M cycles per changed index key on writes, so it never saves cycles; it only raises the page-rate ceiling. With Region shards S stays small (≈ 2–14 for 10 GiB–1 TiB), which puts the ceiling at hundreds of pages per second on 4 subnets; with heap shards (S ≈ 180 at 100 GiB) it drops to ~80. p95 latency (the max of S query latencies) is the second criterion and is not measurable on PocketIC (D8). The coefficients are re-measured on the Region backend before the gate (M9).
 - **Unknowns, stated plainly:**
   - the real per-query latency distribution on mainnet, especially p99 with fan-out;
   - boundary-node and HTTP gateway rate limits for many parallel queries from one client **[unverified]**;
@@ -404,7 +425,7 @@ Resuming a cursor with a stale `epoch`/`slotBits` gets `#wrongShard` from the sh
 - **Client-side parallel queries** are the general mechanism.
   - The TS client issues S concurrent `query` calls.
   - The Motoko client, used from another canister, can only make these as inter-canister calls. From an update that costs cycles and update latency. From a composite query it is limited to the same subnet. Canister callers that need global scans should therefore expect update latency (~1–2 s) unless the shards are co-located.
-- **Optional per-subnet gather** (M5):
+- **Optional per-subnet gather** (conditional; §13 M8 builds it only if measurements show client fan-out is not enough. With Region shards S is small, so client fan-out is expected to suffice):
   - Each subnet gets a small stateless "gather" canister exposing a **composite query** that fans out to the shards on its own subnet and merges them.
   - The client then contacts one gather canister per subnet instead of S shards.
   - Limits:
@@ -437,51 +458,44 @@ All numbers below are **[proposed target]**, not measurements. Latency percentil
 | Point read (`get`, 1 shard) | < 300 ms | < 600 ms | Docs quote ~200 ms per query ([icc]) |
 | Global ordered top-100 page, 16 shards | < 500 ms | < 1 s | Ladder step 1 (D6) |
 | Global ordered top-100 page, 32 shards | < 600 ms | < 1.2 s | Ladder step 2 (D9) |
-| Global ordered top-100 page, 64 shards | — | ≤ 1.5 s | Ladder step 3 = full benchmark scale (D7). **Exceeding this triggers building the global index tier (M6 go/no-go)** |
+| Global ordered top-100 page, at the D7 shard count (≈ 4–8 Region shards) | — | ≤ 1.5 s | Secondary GSI-gate criterion, not measurable on PocketIC (D8). The primary gate is the page-rate-vs-S formula (§5.2, M9) |
 | Long sequential scan (`scan`/`ixScan` pages) | — | — | Pages up to ~1 MB per shard; ≥ 10k records/s per participating shard |
-| Write cost per secondary index | — | — | **D11:** ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard); ≤ 10% extra when index keys are unchanged; **zero** inter-canister calls. *Replaces the original < 20% per index (M1 measured ~35–50% for changed keys, §15).* **M3 (PocketIC):** with the `IxTree` layout, 1.02–1.33 M per changed key by the D11 method (down from 1.55–1.86 M), but 2.0 M on random keys over a 20k-record shard (IX-2; 3.3 M before). The budget is kept pending §14 Q3 (`docs/BENCH.md`). |
+| Write cost per secondary index | — | — | **D11:** ≤ ~1.5 M extra instructions per *changed* index key on a single-op ~1 KB write at the M1 scale (20k records/shard); ≤ 10% extra when index keys are unchanged; **zero** inter-canister calls. *Replaces the original < 20% per index (M1 measured ~35–50% for changed keys, §15).* **M3 (PocketIC):** with the `IxTree` layout, 1.02–1.33 M per changed key by the D11 method (down from 1.55–1.86 M), but 2.0 M on random keys over a 20k-record shard (IX-2; 3.3 M before). The budget is kept pending §14 Q3, re-scoped under D13/D14 to per-backend budgets on the IX-2 method (`docs/BENCH.md`). |
 | `write` latency | ~1–2 s | — | Update path ([canisters]); not a target, an IC property |
 
 **IC limits behind these targets (checked against [Resource limits][limits], 2026-11-13):**
 - Query response size: **3 MiB** for non-replicated queries; 2 MiB for replicated execution (an update or a replicated query, e.g. `getCertainly`). A ~1 MB page fits under both, with room for Candid overhead. Our page cap is by bytes (default 1 MiB), not only by row count.
 - Query instructions: **5 B** per query call. For composite queries the budget is shared across the whole evaluation, including callees (`MAX_CYCLES_PER_QUERY`, [IC spec][spec]).
-- Stable memory read per query: 1 GiB. Not relevant to the EOP heap store, but it would cap a future Region-backed store.
-- Throughput check: 10k records/s per shard at one ~1 MB page per ~200 ms round trip means ~2k records per page (~500 B/record) is enough, so the target leaves headroom. Instructions per scanned row must stay well under 5 B / rows-per-page (about 500 k instructions per row at 10k rows per page). **[unverified until M3 benchmarks]**
+- Stable memory I/O per message: 1 GiB per query, 2 GiB read and 2 GiB write per update [docs, via cost model]. With the Region default (D14) this caps one `scan`/`ixScan` page; at 1 MiB pages it is far away.
+- Throughput check: 10k records/s per shard at one ~1 MB page per ~200 ms round trip means ~2k records per page (~500 B/record) is enough, so the target leaves headroom. Instructions per scanned row must stay well under 5 B / rows-per-page (about 500 k instructions per row at 10k rows per page). M3 measured ~40 k per row for partition scans and ~0.3 M per row for `ixScan` on the heap store (PocketIC); the Region store measured ~30 k per scanned row in the cost model micro-benchmark [estimate for Ekvm].
 
-**Benchmark scale (D7):** 100 M records of ~1 KB (YCSB standard), 3 secondary indexes, 1,000 writes/s aggregate, on **64 shards** across **4 subnets × 16 shards**.
+**Benchmark scale (D7, sizing revised under D14):** 100 M records of ~1 KB (YCSB standard), 3 secondary indexes, 1,000 writes/s aggregate. The original plan was 64 heap shards on 4 subnets; that number came from the heap store's capacity and is withdrawn.
 
-**Why 64 shards (arithmetic, not measured):**
-- Raw values come to 100 M × ~1 KB ≈ 93 GiB. Keys, 3 index entries per record, B-tree slack and the EOP 64-bit layout (up to 2×, [changelog]) bring the estimate to roughly **120–190 GiB**.
-- At the 2 GiB split trigger (§6) that needs about 60–95 shards. 64 shards means ~1.56 M records and ~1.5 GiB of raw values per shard, which fits under 2 GiB only if total overhead stays under ~1.35×.
-- M3 measures real bytes per record. If the overhead is higher, the benchmark either runs at 96 shards (6 subnets × 16) or raises the split trigger to 3 GiB, still well under the 6 GiB heap limit. **[unverified until M3]**
+**Bytes per record and shard counts [estimate, cost model]:**
 
-**Why multiple subnets:**
-- 1,000 writes/s on one subnet would compete for its 4 update threads and come close to its message budget (up to 1,000 messages per block at 1–3 blocks/s, [limits]).
-- With 4 subnets, each subnet carries ~250 writes/s and each shard ~16 writes/s. Writes are batched by the client either way.
-- Storage is not the constraint: ~150 GiB fits within one subnet's 2 TiB. But placing all of it on one subnet would push that subnet toward the 750 GiB reservation threshold together with other tenants ([cycles]).
-- Query load for a 64-way fan-out is spread across 4 subnets' replicas instead of one subnet's 4 query threads per node.
-- Composite-query gather (§5.4) works per subnet, which gives 4 gather calls per page instead of 64 shard calls.
+| Backend | Billed bytes per 1 KB record with 3 indexes | Basis | 100 M records | Shards by size | Shards by write rate (1,000 w/s, 1 changed index key per write) | S |
+|---|---|---|---|---|---|---|
+| Region (default) | ~1.35 KB | 1.04 KB stable per record measured (cost model, 600k records, no indexes) + ~0.3 KB for 3 Region indexes, not measured | ~126 GiB | 4 at the 32 GiB soft cap (2 at 100 GiB) | ⌈1,000 × (0.8 M + 1.0 M) / (0.25 × 2 B)⌉ = 4 | **≈ 4–8** |
+| Hybrid | ~2.35 KB | heap keys + IxTree indexes, Region values | ~220 GiB | ~130 (heap holds keys and indexes; 1.67 GiB usable heap per shard) | 4 | ≈ 80–130 |
+| Heap | ~3.05 KB | between M3's 2.6 KB max-live and 4.1 KB heap per record (PocketIC) | ~284 GiB | ~170–180 at the 2 GiB heap trigger | 7 | ≈ 170–180 |
 
-**The ladder and the go/no-go point:**
-- Because 64 shards is now the benchmark scale itself, the M6 go/no-go is decided by the main benchmark rather than by an extrapolation.
-- The 16- and 32-shard targets remain useful as the **scaling curve**. They run with the same per-shard data size (~1.56 M records per shard, so 25 M and 50 M records total), which keeps per-shard work constant and isolates the fan-out effect.
-- A 16-shard target alone would no longer predict the 64-shard result. The slope from 16 to 32 to 64 is what tells us whether, say, 128 shards would still be viable.
+- The write-rate term assumes a shard may use a quarter of one 2 B instructions/s update thread (`U = 0.25`) **[estimate]**. The per-canister heap floor (~0.33 GiB billed per canister, measured in the cost model) is added to storage.
+- The Region numbers rest on a stable-memory B-tree measured with `memory-collection`; our own B-tree (D15) must reproduce them, and M5 measures that. Region-backed indexes are not measured yet (M6).
+- **Benchmark ladder (revised):** S = 2, 4, 8 with Region shards at constant per-shard data, plus a fan-out stress run at S = 16 and 32 with small shards to fit the gate formula (§5.2). 64 shards is no longer a benchmark step.
+- **Local feasibility:** 126 GiB doesn't fit this machine's PocketIC (71 GiB free disk at the time of writing). The full-scale data set is therefore run per shard (one Region shard at up to ~10 M records ≈ 13 GiB **[proposed]**), and multi-shard runs use reduced per-shard data, labelled accordingly.
+- **Why multiple subnets now:** not for storage or shard count, but for update-thread capacity (4 update threads per subnet) and isolation from other tenants. 1,000 batched writes/s fits one subnet in instruction terms [estimate]; the benchmark still uses 2–4 subnets to exercise placement.
 
-**Cost estimate on mainnet, for reference only: no mainnet runs are planned (D8)** (13-node subnets, cycle prices from [cycle costs][cycles], 1 T cycles = 1 XDR ≈ $1.37). These figures are **[unverified estimates]**: they assume ~3 M instructions per indexed 1 KB write, which M3 replaces with a measurement.
+**Cost estimate on mainnet, for reference only: no mainnet runs are planned (D8)** (13-node subnets, prices from [cycle costs][cycles], 1 T cycles = 1 XDR ≈ $1.37). **[estimate, cost model]**
 
-| Item | Cycles | ≈ USD |
+| Item (Region backend, 100 M × 1 KB, 3 indexes) | Cycles | ≈ USD |
 |---|---|---|
-| Create 64 shards (500 B each) | 32 T | ~$44 (one-off) |
-| Initial balances (2 T each; spent only as used) | 128 T funded | ~$175 tied up, not spent |
-| Load 100 M records, batched (~5.3 M cycles/write) | ~530 T | ~$720 (one-off) |
-| Load 100 M records, unbatched (~11.4 M cycles/write) | ~1,140 T | ~$1,560 |
-| 1 h steady run at 1,000 writes/s, batched | ~19 T | ~$26 per hour |
-| Storage, 120–190 GiB (~329 B cycles per GiB-month) | 40–63 T/month | ~$55–85 per month |
+| Create 4–8 shards (~500 B each; 502.1 B observed on PocketIC) | 2–4 T | ~$3–6 (one-off) |
+| Load 100 M records, batched (~4.3–5.9 M cycles/write) | ~430–590 T | ~$590–810 (one-off); mostly ingress bytes |
+| Load 100 M records, unbatched (~10–12 M cycles/write) | ~1,000–1,200 T | ~$1,400–1,650 |
+| Storage, ~126 GiB + per-canister floors (~329 B cycles per GiB-month) | ~42 T/month | ~$57 per month (heap backend: ~$130) |
 | Queries (reads, scans, global pages) | 0 | free |
 
-Per-write breakdown:
-- **Unbatched:** 1.2 M ingress + 2.2 M for 1.1 KB of payload + 5 M update base + ~3 M instructions.
-- **Batched ×100:** the per-message fees are amortized, leaving ~2.2 M + ~3 M + small overhead.
+Per-write breakdown (formula (1) of the cost model): `write ≈ 6.2 M / batch + 2,000 × bytes + I_engine + k_c × I_ix` cycles, with `I_engine ≈ 0.8 M` (Region, batched) or ~1.4 M (heap), `I_ix ≈ 1.0 M` (Region, estimate) or ~2.0 M (heap with `IxTree`, measured in M3 IX-2), and `k_c` changed index keys per write.
 
 All benchmarks run on **PocketIC (free, multi-subnet)** (D8). Any future mainnet run, at full or reduced scale, would be a new decision needing the user's explicit approval and budget.
 
@@ -516,15 +530,45 @@ Notation: n = records per shard, S = shards, R = ranges in the shard map (R ≥ 
 
 ## 6. Storage inside a shard
 
-**Decision: EOP heap with `mo:core/Map<Key, Stored>` for the primary data, ordered by `(pk, sk)`, plus one `Map<IxPos, ()>` per local index, ordered by `(ixKey, pk, sk)`.** These orders equal the byte orders of `bytes(pk) ‖ sk` and `ixKey ‖ bytes(pk) ‖ sk` (ENCODING.md); M1 stores the structured form so writes never concatenate keys (§15).
+**Decision (D14, D15): the Store is a compile-time-configurable backend per table. The default for primary data is our own B-tree in a stable-memory Region.** Heap (EOP) remains a backend for small deployments, and Hybrid serves large values. All backends implement one `Store` interface: `write` (atomic batch with CAS, index maintenance), `get`, `scan`, `ixScan`, `stats`, `syncSchema`, and later `exportRange`/`importRange` for moves (M7). The choice is a constant in the schema package (like D4 indexes), so there is no runtime dispatch cost and no backend switch without a move.
 
-- **Pros:** no manual memory layout, native-speed access, upgrades independent of heap size, and type-checked upgrade compatibility ([EOP][eop]).
-- **Cons:** capacity is bounded by the heap (6 GiB on wasm64), and EOP's 64-bit layout can use up to 2× more memory ([changelog][changelog]). We keep shards well under that: the 2 GiB split trigger leaves GC and migration headroom. Index entries add memory roughly proportional to (entries × indexes × key size), which counts toward the trigger.
-- **Regions (stable memory), rejected for v1.**
-  - The docs say to use them "only if enhanced orthogonal persistence does not fit your use case". Access is "significantly higher" cost, and layout and free-space management are manual ([Stable memory and regions][regions]).
-  - The default page cap is inconsistent in the docs: the compiler reference says `--max-stable-pages` defaults to 100 GiB ([compiler ref][mocref]), while `core/Region.mo` says 4 GiB. **[unverified which applies]**
-  - Storage sits behind a `Store` interface so that a Region-backed store can be added later, e.g. for large cold values.
-- **Memory measurement:** heap size from the runtime (`Prim.rts_heap_size` / `rts_memory_size`) and `canister_status.memory_metrics` from the index. **[unverified: exact core API names]**
+**Why the earlier "EOP heap only" choice was reversed.** The cost model (PocketIC micro-benchmarks, 16 B keys, 1,000 B values, no indexes, 600k records; Region measured with `memory-collection` 0.4.0) found [measured in the cost model, not yet in Ekvm]:
+
+| Per op | Heap (`core/Map`) | Hybrid | Region B-tree |
+|---|---:|---:|---:|
+| Single put (overwrite), one message | 1.97 M | 2.13 M | 2.13 M |
+| Single insert | 2.07 M | 2.18 M | 2.66 M |
+| Put in a batch of 100, per op | 1.09 M | 0.70 M | 0.50 M |
+| Get in a batch of 100, per key | 1.04 M | 0.62 M | 0.33 M |
+| Scan, per row | 81 k | 61 k | 30 k |
+| Bulk load, per record | 385 k | 179 k | 168 k |
+| Billed memory per record | 2.8 KB (heap) | ~1.0 KB stable + heap | 1.04 KB stable + heap |
+
+- Single-op messages cost about the same everywhere, because ~1.5 M instructions go to page touches. Batches and scans are 2–3× cheaper on the compact Region layout.
+- The heap is billed at its high-water mark (wasm memory never shrinks), so a 1 KB record costs 2.3–2.8× its live size. Under the 2 GiB split trigger, that is what makes the heap store need ~170–180 shards for 100 GiB (§5.7).
+- The docs' advice to use Regions "only if enhanced orthogonal persistence does not fit your use case" ([Stable memory and regions][regions]) applies: EOP does not fit 1–500 GiB per deployment without hundreds of shards.
+
+**Backends:**
+
+| Backend | Primary data | Indexes | Use for | Split trigger |
+|---|---|---|---|---|
+| **Region** (default) | Own B-tree in a Region (D15) | Region B-trees, one per index (M6); heap `IxTree` until then | Everything in the target use case (D13) | write rate, or stable size > soft cap (32 GiB **[proposed default]**) |
+| **Heap** | `core/Map<Key, Stored>` on the EOP heap (M1–M3 code) | `IxTree` (M3) | Small deployments (≲ a few GiB) where simplicity wins; the cost difference is < 2% of message cost there [estimate, cost model formula (5)] | heap > 2 GiB |
+| **Hybrid** | Keys and per-entry metadata on the heap, values appended to a Region log (with compaction) | `IxTree` on the heap | Large values (~10 KB and up) with few indexes | heap > 2 GiB or stable size > soft cap |
+
+**Region B-tree design sketch (D15; built in M5, details settled there):**
+- **Pages:** fixed-size nodes (4 KiB or 8 KiB, chosen by measurement; the IC charges per 4 KiB OS page touched, 10 k instructions on wasm64 for first access + first write [replica code via cost model]). One Region per tree, grown with `Region.grow`; page 0 holds a header (magic, format version, root, free-list head, counts).
+- **Keys** are the physical byte keys (`bytes(pk) ‖ sk` for the primary, `ixKey ‖ bytes(pk) ‖ sk` for indexes; ENCODING.md), stored inline in nodes with prefix-friendly binary search; keys are ≤ 2 KiB (pk ≤ 1 KiB, sk ≤ 1 KiB).
+- **Values:** inline in the leaf up to a threshold (e.g. 512 B **[proposed]**), otherwise in overflow pages (chains up to 1 MiB). The leaf entry also stores the version and the entry's current index keys (needed for diffing on overwrite) or a pointer to them.
+- **Free space:** a free list of pages; overflow chains are freed on overwrite and delete. Underfull nodes are merged or rebalanced on delete (unlike the M3 `IxTree`).
+- **Atomicity:** an IC message either commits all stable-memory writes or none, so no write-ahead log is needed; a trap rolls back the whole batch. Multi-message jobs (backfill, moves) keep their own cursors.
+- **Upgrades:** the Region survives upgrades untouched; the heap keeps only the Region handle and small metadata (EOP). Upgrade cost is constant in data size. A format version in the header allows later migrations.
+- **Limits:** stable memory up to 500 GiB per canister and 2 GiB read/write per update (1 GiB per query) [docs, via cost model]; moc's `--max-stable-pages` default is unclear in the docs (100 GiB vs 4 GiB, **[unverified]**, settled in M5 by test). Snapshot and move times of large shards are **[unverified]**, which is why the soft cap starts at 32 GiB.
+- **Not adopted:** `memory-collection` (MIT, v0.4.0, one maintainer). We use its published structure and the cost-model numbers as a reference only (D15).
+
+**Carried over from M1–M3:** the heap `Store` becomes the Heap backend unchanged; `IxTree` stays the index tree of the Heap and Hybrid backends and of the Region backend until Region indexes land (M6); the M3 locality numbers remain the Heap baseline.
+
+- **Memory measurement:** `Prim.rts_heap_size` / `rts_max_live_size` / `rts_memory_size` (M3), stable size from `Region.size`, and `canister_status.memory_size` from the index.
 - Set `wasm_memory_limit` on each shard as a hard stop, plus `wasm_memory_threshold` so a low-memory hook fires early ([management canister][mgmt]). **[unverified: Motoko `system func lowmemory` support]**
 - **Rescue path:** a controller-only `exportRange` query, as recommended in the EOP docs.
 
@@ -568,7 +612,7 @@ On the fiduciary subnet, multiply by ×2.6. Use the `ic0.cost_*` APIs instead of
   - Another subnet: the management canister creates on the caller's subnet ([forum][subnetq]), so this goes through the CMC `create_canister` with `subnet_selection`. **[unverified: CMC call shape from a canister]** ([subnet selection][subsel])
 - **Top-up:** a timer in the index (default every 10 min) reads each shard's `canister_status` (cycles, `idle_cycles_burned_per_day`, memory). It sends `deposit_cycles` when a shard's balance drops below `max(7 × daily burn, 1 T)`.
 - **Freezing threshold** is left at the default of 30 days.
-- **Implemented in M3 (exercised on PocketIC only):** same-subnet creation (`createShards`, actor-class instantiation from the index), the top-up timer, per-shard status and `lowCycles`. Cross-subnet creation via the CMC moves to M5 (§15 M3).
+- **Implemented in M3 (exercised on PocketIC only):** same-subnet creation (`createShards`, actor-class instantiation from the index), the top-up timer, per-shard status and `lowCycles`. Cross-subnet creation via the CMC moves to M8 (re-planned §13; §15 M3).
 - **Index funding** is the operator's job. The index exposes its own projected runway, and `status()` raises a `lowCycles` flag well before shards would freeze.
 - **Reserved cycles:** on subnets above 750 GiB, memory growth reserves cycles. Monitoring includes `reserved_cycles`, and subnet choice should avoid full subnets.
 
@@ -675,7 +719,7 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 - per-shard and per-subnet ops/s ceilings (derived from instruction counts and the documented thread limits);
 - index memory overhead.
 
-**Scale and pass criteria:** the D7 dataset (100 M × ~1 KB records, 3 indexes, 1,000 writes/s aggregate, 64 shards on 4 PocketIC subnets) and the targets in §5.7, run as a ladder at 16, 32 and 64 shards with constant per-shard data. Smaller scales (1 M, 10 M records) run first in CI. Whether PocketIC on one box can hold ~150 GiB of state across 64 canisters is **[unverified]**. If it can't, the ladder uses the same per-shard size on fewer shards per run, and the full 64-shard run uses a reduced per-shard size (results labelled accordingly). Instruction-based targets (index write overhead, rows per page, records/s per shard derived from instructions) can be checked locally.
+**Scale and pass criteria (revised under D14):** the D7 workload (100 M × ~1 KB records, 3 indexes, 1,000 writes/s aggregate) at its expected Region shard count (≈ 4–8), run as a ladder at S = 2, 4, 8 with constant per-shard data, plus a fan-out stress run at S = 16 and 32 with small shards to fit the gate formula (§5.2). The full dataset does not fit this machine (§5.7), so the full per-shard size is run on one shard (up to ~10 M records **[proposed]**) and multi-shard runs use reduced per-shard data, labelled accordingly. Every run reports **cycles per logical write** (batched and unbatched), **billed bytes per record**, and **S** by backend (D13). Instruction-based targets can be checked locally.
 
 **Harness (M3):** `ts/bench/` (`scripts/bench.sh smoke|baseline`). The M3 baseline in `docs/BENCH.md` ran at ≤ 120k records and ≤ 32 shards on one subnet. The D7-scale ladder above is still to be run.
 
@@ -693,16 +737,23 @@ The suite is generic, synthetic and reproducible (seeded), and runs on PocketIC 
 | M1 ✅ | Single shard: Store on `core/Map`, write/get/scan/delete, CAS, dedupe, access control, **`Schema` and local indexes and `ixScan`** | Done 2026-11-13: `mops test` 45/45, TS unit 22/22, PocketIC 29/29 (incl. the D6 instruction bench) |
 | M2 ✅ | Index canister plus static multi-shard: range-compressed shard map, delta fetch, `route` checks, TS client routing, **global `query`/`topN` via k-way merge and cursor** | Done 2026-11-14: `mops test` 49/49, TS unit 30/30, PocketIC 42/42; 8-shard global scans over 3 indexes equal the reference |
 | M3 ✅ | Cycles: create, top-up, status/metrics. **Benchmark harness, YCSB A–E and IX-1…3, synthetic data generator**. Index-tree memory-locality experiment (D11) | Done 2026-11-15: `mops test` 70/70, TS unit 33/33, PocketIC 52/52; baseline in `docs/BENCH.md` (PocketIC, ≤ 120k records, ≤ 32 shards, one subnet); `IxTree` cuts instructions per changed index key by 29–40% and is the default layout; D11 budget kept (§14 Q3) |
-| M4 | Split/move protocol with crash-resume (local index entries move with their rows), **slot doubling and oversized-slot split**, salting helpers (§4.5). **Index backfill/drop jobs** | Split-under-load test and scan-across-split test green |
-| M5 | Wasm store and rolling upgrade with snapshots, multi-subnet placement (PocketIC), **optional per-subnet composite-query gather**, **Motoko client** for canister callers (routing, batches, global `query`/`topN` through the gather canister; D12) | Upgrade/rollback tests green, IX-1 re-run multi-subnet, Motoko-client global queries equal the reference on PocketIC |
-| M6 | README, examples, demo (incl. the ad-auction example), v0.1.0 tag (local only, not published). **GSI decision gate:** go if the 64-shard global top-100 page p95 (the D7 benchmark scale) exceeds 1.5 s (D6), if the 16→32→64 ladder slope rules out larger deployments, or if the instruction-based targets fail | Review with the user |
-| M7 | *(conditional on M6)* GSI tier: range-partitioned index shards, outbox propagation, lag metric, fallback to scatter-gather | Lag-bounded consistency tests green |
+| M4 | **Store interface, tables and backend selection; client-side batching.** Extract the `Store` interface (§6) with the heap store as the Heap backend; tables declared in the schema package with a compile-time backend constant; table id in the API (default 0). TS `writer` (§4.2) with per-op promises, per-shard flush, CAS policy. Harness gains backend, bytes-per-record and S columns, and a batching sweep (1/5/20/100) | Existing suites green on the Heap backend through the interface; a second table with its own schema in one shard; `writer` tests (ordering, partial failure, `#wrongShard` regroup, dedupe on retry); BENCH.md row "cycles per logical write vs batch size" (PocketIC) |
+| M5 | **Region B-tree for primary data (D15)** and the **Region backend** as default: pages, inline/overflow values, free list, merge on delete, header and format version, upgrade persistence | Property tests against a reference model (random put/delete/overwrite incl. overflow values and merges, ≥ 1 M ops); upgrade keeps data with constant upgrade cost; ≥ 1 M records on one PocketIC shard; YCSB A–E and IX-2 Heap vs Region in BENCH.md; batched put and scan per row within ~20% of the cost model's Region numbers, or a documented reason; `--max-stable-pages` question settled |
+| M6 | **Region-backed local indexes** (version stored in the index entry, Q5), **index backfill/drop jobs** (timer-driven, resumable), **Hybrid backend** (heap keys + Region value log with compaction) | Index scans and global queries equal the reference on all three backends; backfill of a new index on a non-empty shard reaches `#ready` across upgrades and traps; IX-1…3 and IX-2 per backend in BENCH.md (D11 re-measured as per Q3); Hybrid with 10 KB values benchmarked |
+| M7 | **Split/move protocol** with crash-resume (rows and their local index entries move together), oversized-slot split, salting helpers (§4.5), and **backend migration** via move (copy into a shard with another backend). Lower priority than before: with Region shards, splits are rare | Split-under-load and scan-across-split tests green; a Heap→Region migration under load with no lost or duplicated rows |
+| M8 | **Operations and reach:** wasm store and rolling upgrades with snapshots, multi-subnet placement (PocketIC; CMC creation path verified), **Motoko client** (D12; direct inter-canister fan-out, small S), per-subnet gather canister **only if** client fan-out measurements require it | Upgrade/rollback tests green; IX-1 re-run on 2–4 subnets; Motoko-client global queries equal the reference |
+| M9 | **D7-scale benchmark (revised), README, examples, demo (incl. the ad-auction example), v0.1.0** (local tag, not published). **GSI gate:** evaluate formula (6) (§5.2) with coefficients re-measured on the Region backend, for the target use cases' expected page rates and S | BENCH.md D7 runs as in §12; gate recommendation written up for the user's decision |
+| M10 | *(conditional on M9)* GSI tier: range-partitioned index shards, outbox propagation, lag metric, fallback to scatter-gather (`IndexDef.global = true`) | Lag-bounded consistency tests green |
+
+**Order and rationale.** M4 comes first because batching is the largest cost lever (~50–60% of write cycles [estimate]) and the interface is a prerequisite for every backend. M5–M6 deliver the D14 default. Moves (M7) drop in priority because Region shards rarely split, but are still needed for growth and backend migration. The gather canister and the GSI become conditional on measurements.
+
+**What carries over from M3:** the heap Store (as the Heap backend), `IxTree` (Heap/Hybrid index tree; Region's until M6), the benchmark harness and generator (extended per backend), `explain` and shard metrics, shard creation and cycles top-up, and the M3 baseline as the Heap reference in BENCH.md.
 
 ---
 
 ## 14. Open questions
 
-The design is complete as of D1–D12. Questions found during implementation:
+The design is complete as of D1–D15. Questions found during implementation and planning:
 
 - **Q1 (M1), resolved 2026-11-14 as D11.** The < 20% per-index target was missed for writes that change index keys (~35–50% per index on PocketIC; cause is the IC per-page memory charge, §15). Decision: restate it as an absolute budget per changed index key (≈ 1.5 M instructions at the M1 scale), keep zero inter-canister calls, and run a **locality experiment in M3**: inline fixed-size key prefixes in B-tree nodes, a larger node order, or a Region-backed index store. M3 reports instructions per changed index key before and after, and lowers the D11 budget if the experiment wins.
 - **Q2 (M2), resolved 2026-11-15 as D12: option (a), build the Motoko client in M5.** §3 lists a client API for TS *and* Motoko. M2 built only the TS client. A Motoko client would route keys and run global queries from another canister, through inter-canister calls (§5.4): update latency, cycles per call, and composite-query fan-out limited to the same subnet. Options:
@@ -711,19 +762,18 @@ The design is complete as of D1–D12. Questions found during implementation:
   - (c) leave it out of v1 and document TS as the only client.
 
   Recommendation was (a); the user chose (a).
-- **Q3 (M3): which method should the D11 budget be measured with?** D11 is defined on single-op writes at 20k records per shard. Its benchmark (`bench.test.ts`) touches recently inserted keys, which sit close together in memory. On that method `IxTree` measures 1.02–1.33 M instructions per changed key, under the 1.5 M budget. The harness's IX-2 updates Zipf-random keys across the whole shard, and there the same code costs ~2.0 M per changed key (the old tree: 3.3 M). Options:
-  - (a) keep D11 at ~1.5 M on the current method and track IX-2 as information;
-  - (b) re-base D11 on IX-2 at ~2.0–2.2 M per changed key;
-  - (c) keep 1.5 M as the target on IX-2. That would need more locality work, e.g. storing the row version in the index entry, or a Region-backed index store.
+- **Q3 (M3), re-scoped 2026-11-15 under D13/D14: how is the write-cost budget measured?** D11's method (`bench.test.ts`, recently inserted keys) understates cost: on random keys over a 20k-record shard (IX-2) the heap `IxTree` costs ~2.0 M instructions per changed key, not 1.02–1.33 M. D13 makes **cycles per logical write** the metric, so the per-index budget becomes one term of it. Proposed resolution:
+  - measure per backend on the IX-2 method (Zipf-random keys over the whole shard), both single-op and batched (20 and 100);
+  - Heap backend: ≤ ~2.2 M instructions per changed key (measured ~2.0 M);
+  - Region backend: ≤ ~1.0 M per changed key **[estimate, to be confirmed in M6]**;
+  - keep "≤ 10% extra when index keys are unchanged" and zero inter-canister calls.
 
-  The budget was **not** lowered in M3, pending this answer. Recommendation: (b), with (c)'s ideas left as later optimizations.
-- **Q4 (M3): default fan-out mode for global queries.** §5.3 left exact vs adaptive to M3. At 2,000 records per shard, adaptive (⌈2·limit/S⌉ rows per shard) fetched 2–2.4× the rows returned, against S× for exact. Total read instructions per top-100 page came out 27% lower at S = 4 and ~4× lower at S = 32. But at S = 32 every query needed a second round for 2 shards, and at S = 1 adaptive costs more. On the IC a second round adds one query round trip of latency, which PocketIC cannot measure. Options:
-  - (a) keep exact as the default (current);
-  - (b) adaptive when S ≥ 4;
-  - (c) always adaptive.
-
-  Recommendation: (b), revisited after the multi-subnet IX-1 in M5.
-- **Q5 (M3): `ixScan` per-row cost.** A 100-row index page costs ~0.3 M instructions per row, probably mostly the primary lookup that fetches each row's version. Storing the version in the index entry would avoid that lookup when `withValues = false`. The price is a larger index and an index update on every write, even when the key is unchanged. Should this go into M4?
+  **Needs the user:** confirm these numbers as the new D11 (recommendation: yes; it is what D11's option (b) proposed, applied per backend).
+- **Q4 (M3), re-scoped: default fan-out mode for global queries.** With Region shards S is expected to be 2–8 (§5.7). M3 measured adaptive 27% cheaper in read instructions at S = 4 and ~4× cheaper at S = 32, but queries cost no cycles, and at small S the saving is small in absolute terms while adaptive's occasional second round adds a query round trip of latency. Adaptive matters for query capacity at larger S, which is where the GSI gate formula uses it. **Recommendation:** an `auto` default: exact when S ≤ 8, adaptive when S > 8, with an explicit option to force either. **Needs the user:** confirm `auto` with threshold 8, or keep exact always.
+- **Q5 (M3), re-scoped into M6: store the row version in the index entry.** In the Region B-tree the index entry has a fixed value slot, so the 8-byte version can live there and `ixScan` with `withValues = false` skips the primary lookup that dominated M3's ~0.3 M instructions per row. The price is an in-place 8-byte write per index per write, even when the key is unchanged (roughly one dirty page per index per write; for batches it is amortized). **Recommendation:** yes for the Region backend, measured in M6 against the unchanged-key budget (Q3); no change for the Heap backend. **Needs the user:** only if M6 shows the unchanged-key write cost above 10% per index.
+- **Q6 (planning, D14): does D12 still bind the Motoko client to a gather canister?** D12 put the Motoko client in M5 with the per-subnet gather. Under D14, S is small and client fan-out is expected to suffice, so the gather becomes conditional. **Recommendation:** build the Motoko client in M8 with direct inter-canister fan-out to the S shards, and the gather only if measurements show the need. **Needs the user.**
+- **Q7 (planning): Region shard soft cap.** Larger shards mean fewer shards (D13) but longer snapshots and moves, neither measured. **Recommendation:** start at 32 GiB, raise toward 100 GiB once M7/M8 measure move and snapshot times. **Needs the user** only to change the starting value.
+- **Q8 (planning): CAS ops in the batching `writer`.** A shard batch is all-or-nothing, so one failing conditional op would fail unrelated ops in the same flush. **Recommendation:** the writer sends conditional ops (`#absent`, `#version`) in their own per-caller messages and only coalesces unconditional ops; `batch()` keeps today's all-or-nothing semantics for callers who want them. Settled in M4 unless the user prefers otherwise.
 
 ## 15. Implementation notes
 
@@ -943,6 +993,12 @@ The values are recorded in `build/bench-m2.json`. Latency targets (D6/D9) can't 
 
 ---
 
+### Planning rev 6 (2026-11-15, docs only)
+
+- D13–D15 recorded from the cost model (`/workspace/ekvm-costmodel`: README, `model.py`, `model.json`, `results-*.json`). Its Region numbers are PocketIC micro-benchmarks on `memory-collection` 0.4.0, its heap numbers on `core/Map`; no Ekvm code changed.
+- Milestones M4+ re-planned (§13); old M4 (split/move) is now M7, old M5 (operations, Motoko client) M8, old M6 (docs, GSI gate) M9, old M7 (GSI) M10. Index backfill/drop moved from old M4 to M6.
+- Q3–Q5 re-scoped; Q6–Q8 added (§14).
+
 ## References
 
 [limits]: https://docs.internetcomputer.org/references/resource-limits/
@@ -955,6 +1011,8 @@ The values are recorded in `build/bench-m2.json`. Latency targets (D6/D9) can't 
 [op]: https://docs.internetcomputer.org/languages/motoko/fundamentals/actors/orthogonal-persistence/overview/
 [changelog]: https://docs.internetcomputer.org/languages/motoko/reference/changelog/
 [regions]: https://docs.internetcomputer.org/languages/motoko/icp-features/stable-memory/
+[memcoll]: https://github.com/NatLabs/memory-collection
+[subnetcfg]: https://github.com/dfinity/ic/blob/master/rs/config/src/subnet_config.rs
 [mocref]: https://docs.internetcomputer.org/languages/motoko/reference/compiler-ref/
 [subsel]: https://docs.internetcomputer.org/guides/canister-management/subnet-selection/
 [subnetq]: https://forum.dfinity.org/t/in-which-subnet-does-ic-create-canister-create-a-canister/33279
