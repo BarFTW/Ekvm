@@ -12,6 +12,8 @@ build() {
 }
 build index Index
 build shard Shard
+# Index embedding the demo-schema shard (createShards tests and benchmarks).
+build index-ix3 Index test/schemas/ix3
 # Test/bench shards with 0..3 demo indexes (ix3 is the demo schema).
 for k in 0 1 2 3; do build "shard-ix$k" Shard "test/schemas/ix$k"; done
 ls -l build/*.wasm

@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["src", "test", "integration"]
+  "include": ["src", "test", "integration", "bench"]
 }

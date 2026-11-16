@@ -1,6 +1,7 @@
-// D6 per-index write overhead, measured on PocketIC (local replica emulation,
-// NOT mainnet). The same shard code is built with 0..3 demo indexes
-// (build/shard-ix{0..3}.wasm). Each write's instruction count is the shard's
+// D6/D11 per-index write overhead and the M3 index-tree locality experiment,
+// measured on PocketIC (local replica emulation, NOT mainnet). The same shard
+// code is built with 0..3 demo indexes (build/shard-ix{0..3}.wasm) and run
+// with both index layouts (`btree` = core Map, M1/M2; `prefix` = IxTree). Each write's instruction count is the shard's
 // own ic0.performance_counter(0) at the end of `write` (excludes reply
 // encoding). Results are printed and written to build/bench-m1.json.
 import { after, before, describe, test } from "node:test";
@@ -17,6 +18,7 @@ const out = new URL("../../build/bench-m1.json", import.meta.url).pathname;
 const admin = createIdentity("ekvm-bench-admin");
 const PRELOAD = Number(process.env.EKVM_BENCH_PRELOAD ?? 20_000);
 const N = Number(process.env.EKVM_BENCH_N ?? 200);
+const LAYOUTS = (process.env.EKVM_BENCH_LAYOUTS ?? "btree,prefix").split(",") as ("btree" | "prefix")[];
 const cats = ["books", "games", "tools", "toys", "food", "music", "garden", "sport"];
 
 let server: PocketIcServer;
@@ -38,14 +40,16 @@ const rec = (i: number, v: number) => encodeItem({
 const key = (i: number) => ({ pk: E.tuple(E.text("user"), E.nat64(i)), sk: E.text("rec") });
 
 type Phase = { perMessage: number; perOp: number; storePerOp: number; ops: number };
+const heapAfterPreload: Record<string, number> = {};
+const liveAfterPreload: Record<string, number> = {};
 const results: Record<string, Record<string, Phase>> = {};
 
 describe("D6 per-index write overhead (PocketIC measurement)", () => {
-  for (const k of [0, 1, 2, 3]) {
-    test(`shard with ${k} index(es)`, async () => {
+  for (const layout of LAYOUTS) for (const k of [0, 1, 2, 3]) {
+    test(`${layout}: shard with ${k} index(es)`, async () => {
       const subnets = await pic.getApplicationSubnets();
       // The bench shard's "index" is the admin identity, so it can assign slots and access directly.
-      const f = await pic.setupCanister({ idlFactory: shardIdl, wasm: wasm(`shard-ix${k}`), sender: admin.getPrincipal(), arg: shardInit(admin.getPrincipal()), targetSubnetId: subnets[0]!.id });
+      const f = await pic.setupCanister({ idlFactory: shardIdl, wasm: wasm(`shard-ix${k}`), sender: admin.getPrincipal(), arg: shardInit(admin.getPrincipal(), layout), targetSubnetId: subnets[0]!.id });
       const s: any = f.actor;
       s.setIdentity(admin);
       await s.assign({ epoch: 1n, slotBits: 16, acceptPrevSlotBits: [], owned: [[0n, 65536n]] });
@@ -65,6 +69,9 @@ describe("D6 per-index write overhead (PocketIC measurement)", () => {
       for (let i = 0; i < PRELOAD; i += 100) {
         await c.batch(Array.from({ length: 100 }, (_, j): WriteOp => ({ put: { key: key(i + j), value: rec(i + j, 0), cond: { any: null } } })));
       }
+      const hs = await s.stats();
+      heapAfterPreload[`${layout}/ix${k}`] = Number(hs.heapBytes);
+      liveAfterPreload[`${layout}/ix${k}`] = Number(hs.maxLiveBytes);
       const base = PRELOAD;
       await measure("insert", async () => { for (let i = 0; i < N; i++) await c.put(key(base + i), rec(base + i, 0), { absent: null }); });
       await measure("updateIndexed", async () => { for (let i = 0; i < N; i++) await c.put(key(base + i), rec(base + i, 1)); });
@@ -85,23 +92,33 @@ describe("D6 per-index write overhead (PocketIC measurement)", () => {
       });
       const st = await s.stats();
       assert.equal(st.indexes.length, k);
-      results[`ix${k}`] = phases;
+      results[`${layout}/ix${k}`] = phases;
     });
   }
 
   test("report", () => {
-    const rows: string[] = [];
-    const overhead: Record<string, Record<string, number>> = {};
-    for (const phase of Object.keys(results.ix0!)) {
-      const b = results.ix0![phase]!.perOp;
-      const line = [0, 1, 2, 3].map((k) => results[`ix${k}`]![phase]!.perOp);
-      const store = [0, 1, 2, 3].map((k) => results[`ix${k}`]![phase]!.storePerOp);
-      overhead[phase] = {};
-      for (const k of [1, 2, 3]) overhead[phase]![`ix${k}`] = (line[k]! - b) / b / k;
-      rows.push(`${phase.padEnd(18)} ${line.map((x) => String(x).padStart(10)).join(" ")}  | store ${store.map((x) => String(x).padStart(9)).join(" ")}  | per-index overhead, avg over k=1/2/3: ${[1, 2, 3].map((k) => (100 * overhead[phase]![`ix${k}`]!).toFixed(1) + "%").join(" / ")}`);
+    const lines: string[] = [];
+    const overhead: Record<string, Record<string, Record<string, number>>> = {};
+    // Index keys changed per op for k indexes: every demo index key changes on
+    // insert/delete/updateIndexed (remove + add for updates), none on updatePayloadOnly.
+    const perKey: Record<string, Record<string, number>> = {};
+    for (const layout of LAYOUTS) {
+      const r = (k: number) => results[`${layout}/ix${k}`]!;
+      overhead[layout] = {};
+      perKey[layout] = {};
+      lines.push(`[${layout}]`);
+      for (const phase of Object.keys(r(0))) {
+        const line = [0, 1, 2, 3].map((k) => r(k)[phase]!.perOp);
+        const store = [0, 1, 2, 3].map((k) => r(k)[phase]!.storePerOp);
+        overhead[layout]![phase] = {};
+        for (const k of [1, 2, 3]) overhead[layout]![phase]![`ix${k}`] = (line[k]! - line[0]!) / line[0]! / k;
+        // instructions per index key: least-squares slope through the ix0 point, sum k*d_k / sum k^2
+        perKey[layout]![phase] = Math.round(([1, 2, 3].reduce((a, k) => a + k * (line[k]! - line[0]!), 0)) / 14);
+        lines.push(`${phase.padEnd(18)} ${line.map((x) => String(x).padStart(10)).join(" ")}  | store ${store.map((x) => String(x).padStart(9)).join(" ")}  | per index ${[1, 2, 3].map((k) => (100 * overhead[layout]![phase]![`ix${k}`]!).toFixed(1) + "%").join(" / ")}  | per index key ${perKey[layout]![phase]}`);
+      }
     }
-    console.log(`\nPocketIC measurement (not mainnet): instructions per op (whole message | inside Store.write), preload=${PRELOAD}, N=${N}\n${"phase".padEnd(18)} ${["ix0", "ix1", "ix2", "ix3"].map((x) => x.padStart(10)).join(" ")}\n${rows.join("\n")}\n`);
-    writeFileSync(out, JSON.stringify({ note: "PocketIC measurement, not mainnet", preload: PRELOAD, n: N, results, overheadPerIndex: overhead }, null, 2));
-    for (const k of [0, 1, 2, 3]) assert.ok(results[`ix${k}`]!.insert!.perOp > 0);
+    console.log(`\nPocketIC measurement (not mainnet): instructions per op (whole message | inside Store.write), preload=${PRELOAD}, N=${N}\n${"phase".padEnd(18)} ${["ix0", "ix1", "ix2", "ix3"].map((x) => x.padStart(10)).join(" ")}\n${lines.join("\n")}\n`);
+    writeFileSync(out, JSON.stringify({ note: "PocketIC measurement, not mainnet", preload: PRELOAD, n: N, results, overheadPerIndex: overhead, instructionsPerIndexKey: perKey, heapAfterPreload, liveAfterPreload }, null, 2));
+    for (const layout of LAYOUTS) for (const k of [0, 1, 2, 3]) assert.ok(results[`${layout}/ix${k}`]!.insert!.perOp > 0);
   });
 });

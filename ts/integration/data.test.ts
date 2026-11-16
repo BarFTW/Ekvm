@@ -266,10 +266,16 @@ describe("M1 local secondary indexes (PocketIC)", () => {
     const s = shards[id.toText()];
     const before = await s.stats();
     // setupCanister made admin the shard controller (index-as-controller arrives with M3 shard creation).
-    const upAdmin = (w: string) => pic.upgradeCanister({
-      canisterId: id, wasm: wasm(w), sender: admin.getPrincipal(), arg: shardInit(ids.index),
-      upgradeModeOptions: { skip_pre_upgrade: [], wasm_memory_persistence: [{ keep: null }] },
-    });
+    // Upgrades are spaced out by simulated time: the replica rate-limits
+    // install_code per canister by instructions executed in recent installs.
+    const upAdmin = async (w: string) => {
+      await pic.advanceTime(10 * 60_000);
+      await pic.tick();
+      await pic.upgradeCanister({
+        canisterId: id, wasm: wasm(w), sender: admin.getPrincipal(), arg: shardInit(ids.index),
+        upgradeModeOptions: { skip_pre_upgrade: [], wasm_memory_persistence: [{ keep: null }] },
+      });
+    };
     await upAdmin("shard-ix3");
     const same = await s.stats();
     assert.equal(same.entries, before.entries);
